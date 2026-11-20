@@ -7,7 +7,10 @@
 //! once, with MEASn_DONE_SAR set and the code in MEASn_DATA_SAR; clearing
 //! MEASn_START_SAR clears MEASn_DONE_SAR. The board sets the input voltage of
 //! each ADC1 channel ([`Sens::set_adc1_mv`]); the ADC2 channels read 0 V. The
-//! touch sensor, the temperature sensor and the ULP coprocessor do not run.
+//! converters are linear through their calibration point, which the eFuses
+//! hold, apart from a small deviation that the curve-fitting calibration
+//! removes. The touch sensor, the temperature sensor and the ULP
+//! coprocessor do not run.
 
 /// ADC1 input channels (channel `n` is GPIO `n + 1`).
 pub const ADC1_CHANNELS: usize = 10;
@@ -169,10 +172,10 @@ impl Sens {
                 let old = self.get(off);
                 let mut new = (old & ro) | (v & !ro);
                 if off == MEAS1_CTRL2 {
-                    new = self.meas(old, new, |s, pads| s.adc_code(pads, ATTEN1, &s.adc1_mv));
+                    new = self.meas(old, new, |s, pads| s.adc_code(0, pads, ATTEN1, &s.adc1_mv));
                 } else if off == MEAS2_CTRL2 {
                     new = self.meas(old, new, |s, pads| {
-                        s.adc_code(pads, ATTEN2, &[0; ADC2_CHANNELS])
+                        s.adc_code(1, pads, ATTEN2, &[0; ADC2_CHANNELS])
                     });
                 }
                 self.set(off, new);
@@ -196,9 +199,9 @@ impl Sens {
     }
 
     /// The code of a conversion of the pads in the SARn_EN_PAD bitmap `pads`
-    /// (the lowest one selected wins), with the attenuations of register
-    /// `atten_reg` and the channel inputs `inputs` (mV).
-    fn adc_code(&self, pads: u32, atten_reg: u32, inputs: &[u32]) -> u32 {
+    /// (the lowest one selected wins) by ADC `unit` (0 or 1), with the
+    /// attenuations of register `atten_reg` and the channel inputs `inputs` (mV).
+    fn adc_code(&self, unit: usize, pads: u32, atten_reg: u32, inputs: &[u32]) -> u32 {
         let (channel, mv) = if pads == 0 {
             (CAL_CHANNEL, ADC_REFERENCE_MV)
         } else {
@@ -207,14 +210,139 @@ impl Sens {
             (channel, mv)
         };
         let atten = (self.get(atten_reg) >> (2 * channel)) & 3;
-        code(mv, atten)
+        code(unit, mv, atten)
     }
 }
 
-/// The 12-bit code of `mv` millivolts at attenuation `atten`, rounded to nearest:
-/// `mv * 4095 / full_scale`, clamped to 4095.
-fn code(mv: u32, atten: u32) -> u32 {
-    let full_scale = u64::from(FULL_SCALE_MV[(atten & 3) as usize]);
-    let scaled = (u64::from(mv) * u64::from(CODE_MAX) + full_scale / 2) / full_scale;
-    scaled.min(u64::from(CODE_MAX)) as u32
+/// Input voltage of the factory calibration point, mV.
+pub const CAL_MV: u32 = 850;
+
+/// Deviation of each converter from its line through the origin and the
+/// calibration point, in mV, as a polynomial of the line's voltage `v` (mV):
+/// the coefficients of `v^0` to `v^4`, by ADC and attenuation.
+const DEVIATION: [[[f64; 5]; 4]; 2] = [
+    [
+        [
+            -2.785_653_141_953_83,
+            -5.087_154_056_952_8e-3,
+            9.798_249_589e-6,
+            0.0,
+            0.0,
+        ],
+        [
+            -2.983_102_291_502_87,
+            -4.939_318_586_880_6e-3,
+            1.013_794_305_48e-5,
+            0.0,
+            0.0,
+        ],
+        [
+            -2.328_554_574_629_64,
+            -1.476_401_810_474_14e-2,
+            2.083_855_253_14e-5,
+            0.0,
+            0.0,
+        ],
+        [
+            -0.644_403_418_269_478,
+            -6.443_348_886_475_36e-2,
+            1.297_891_447_611e-4,
+            -7.076_971_8e-8,
+            1.3515e-11,
+        ],
+    ],
+    [
+        [
+            -2.566_865_165_432_89,
+            1.353_548_869_615e-4,
+            3.661_526_518_9e-6,
+            0.0,
+            0.0,
+        ],
+        [
+            -2.369_018_469_029_84,
+            -6.631_989_422_618_5e-3,
+            1.189_649_959_59e-5,
+            0.0,
+            0.0,
+        ],
+        [
+            -0.945_249_939_702_062,
+            -2.009_967_739_543_87e-2,
+            2.590_114_679_56e-5,
+            0.0,
+            0.0,
+        ],
+        [
+            1.224_771_976_433_69,
+            -7.557_179_049_434_62e-2,
+            1.478_791_187_119e-4,
+            -7.967_252_8e-8,
+            1.5038e-11,
+        ],
+    ],
+];
+
+fn deviation(unit: usize, atten: u32, v: f64) -> f64 {
+    DEVIATION[unit & 1][(atten & 3) as usize]
+        .iter()
+        .rev()
+        .fold(0.0, |acc, c| acc * v + c)
+}
+
+/// The 12-bit code ADC `unit` gives for `mv` millivolts at attenuation `atten`:
+/// the voltage `v` on its line, where `v - deviation(v) = mv`, times the slope
+/// of the line (the calibration code over [`CAL_MV`]), rounded, clamped to 4095.
+fn code(unit: usize, mv: u32, atten: u32) -> u32 {
+    let target = f64::from(mv);
+    let mut v = target;
+    for _ in 0..8 {
+        v = target + deviation(unit, atten, v);
+    }
+    let slope = f64::from(calibration_code(unit, atten)) / f64::from(CAL_MV);
+    (v.max(0.0) * slope).round().min(f64::from(CODE_MAX)) as u32
+}
+
+/// The code that defines the line of ADC `unit` at attenuation `atten`, at the
+/// calibration point ([`CAL_MV`]); the eFuses hold it. The full scale of the
+/// attenuation reads 4095 on the line.
+pub fn calibration_code(_unit: usize, atten: u32) -> u32 {
+    let full_scale = FULL_SCALE_MV[(atten & 3) as usize];
+    (CAL_MV * CODE_MAX + full_scale / 2) / full_scale
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Millivolts from a code, as the curve-fitting calibration computes them:
+    /// the line through the origin and the calibration point, less the
+    /// deviation.
+    fn calibrated_mv(unit: usize, atten: u32, raw: u32) -> f64 {
+        let v = f64::from(raw) * f64::from(CAL_MV) / f64::from(calibration_code(unit, atten));
+        v - deviation(unit, atten, v)
+    }
+
+    #[test]
+    fn calibration_recovers_the_input() {
+        for unit in 0..2 {
+            for atten in 0..4 {
+                let full_scale = FULL_SCALE_MV[atten as usize];
+                for mv in (100..full_scale - 50).step_by(50) {
+                    let raw = code(unit, mv, atten);
+                    if raw == CODE_MAX {
+                        // The top of the range saturates.
+                        continue;
+                    }
+                    let back = calibrated_mv(unit, atten, raw);
+                    // One code is under 1 mV.
+                    assert!(
+                        (back - f64::from(mv)).abs() < 1.0,
+                        "ADC{} atten {atten}: {mv} mV -> {raw} -> {back:.1} mV",
+                        unit + 1
+                    );
+                }
+            }
+        }
+    }
 }

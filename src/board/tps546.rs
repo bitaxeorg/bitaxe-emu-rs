@@ -1,5 +1,6 @@
 //! TPS546D24A buck converter on PMBus: every command reads back what was written,
-//! IC_DEVICE_ID and the telemetry commands are computed from the board state.
+//! IC_DEVICE_ID and the telemetry commands are computed from the board state,
+//! MFR_ID, MFR_MODEL and MFR_REVISION start as three zero bytes.
 
 use std::collections::BTreeMap;
 
@@ -15,6 +16,9 @@ const READ_VIN: u8 = 0x88;
 const READ_VOUT: u8 = 0x8b;
 const READ_IOUT: u8 = 0x8c;
 const READ_TEMPERATURE_1: u8 = 0x8d;
+const MFR_ID: u8 = 0x99;
+const MFR_MODEL: u8 = 0x9a;
+const MFR_REVISION: u8 = 0x9b;
 const IC_DEVICE_ID: u8 = 0xad;
 const IC_DEVICE_REV: u8 = 0xae;
 
@@ -63,6 +67,10 @@ impl Tps546 {
         store.insert(OPERATION, vec![0x00]);
         store.insert(IC_DEVICE_ID, vec![6, 0x54, 0x49, 0x54, 0x6d, 0x24, 0x41]);
         store.insert(IC_DEVICE_REV, vec![1, 0x02]);
+        // Blocks of 3 user bytes, zero on a new chip.
+        for cmd in [MFR_ID, MFR_MODEL, MFR_REVISION] {
+            store.insert(cmd, vec![3, 0, 0, 0]);
+        }
         Tps546 {
             store,
             cmd: None,

@@ -181,16 +181,16 @@ its hash in `nix/package.nix`.
   network there is no pool and no job, so the chips stay idle.
 - Hashing on the host is far slower than the chips: at the usual ticket
   difficulties a nonce is rare.
-- The interpreter runs at about 60-80 MIPS: the firmware runs below real time
-  while it is busy, and the window shows the speed.
+- The interpreter runs at about 60 MIPS for both cores together (some 180 host
+  instructions per emulated one): a busy firmware runs below real time, an
+  idle one faster (the time a core spends in WAITI is skipped). After boot,
+  ESP-Miner runs at about 1.4× real time; esp-miner-rs at about 0.25×, as its
+  executor never lets the core idle. The window shows the speed.
 - The power, thermal and fan figures come from a simple model, not from
   measurements of each board.
 - ESP-Miner runs (both cores, the octal PSRAM, the display, the regulator, the
   fans and the ASIC chain) from its release images; its CI image holds no board
-  settings. The emulated eFuses carry no ADC calibration, so ESP-Miner logs ADC
-  calibration errors (every 100 ms on the DAC boards, which read the core
-  voltage on the ADC); the TPS546 model does not answer MFR_ID, MFR_MODEL or
-  MFR_REVISION.
+  settings.
 
 ## Licenses
 

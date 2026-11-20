@@ -1,6 +1,8 @@
 //! eFuse controller (0x6000_7000): the read registers of the eFuse blocks and
 //! the read/program command protocol.
 
+use super::sens;
+
 /// Block read registers: BLOCK0 (6 words) at 0x2C to BLOCK10 ending at 0x178.
 const BLOCKS_START: u32 = 0x02c;
 const BLOCKS_END: u32 = 0x17c;
@@ -17,6 +19,19 @@ const DATE: u32 = 0x1fc;
 
 /// Word index of BLOCK1 (MAC, SPI and system data) in [`Efuse::words`].
 pub const BLOCK1: usize = 6;
+/// Calibration fields: block, first bit, width. The ADC codes at the
+/// calibration point, ADC1 then ADC2, attenuations 0 to 3.
+const BLK_VERSION_MAJOR: (usize, usize, usize) = (2, 128, 2);
+const ADC_CAL_CODE: [(usize, usize, usize); 8] = [
+    (2, 201, 8),
+    (2, 209, 8),
+    (2, 217, 8),
+    (2, 225, 8),
+    (2, 233, 8),
+    (2, 241, 7),
+    (2, 248, 7),
+    (1, 186, 6),
+];
 /// Start word of each block (BLOCK0..BLOCK10) and its length in words.
 const BLOCK_LAYOUT: [(usize, usize); 11] = [
     (0, 6),
@@ -52,12 +67,48 @@ impl Efuse {
         }
     }
 
-    /// eFuse contents with the given MAC address and nothing else burnt.
+    /// eFuse contents of a chip with the given MAC address and its ADC
+    /// calibration (version 1).
     pub fn with_mac(mac: [u8; 6]) -> Self {
         let mut words = [0u32; WORDS];
         words[BLOCK1] = u32::from_be_bytes([mac[2], mac[3], mac[4], mac[5]]);
         words[BLOCK1 + 1] = u32::from(u16::from_be_bytes([mac[0], mac[1]]));
-        Efuse::new(words)
+        let mut efuse = Efuse::new(words);
+        efuse.burn_adc_calibration();
+        efuse
+    }
+
+    /// Burns `value` into the field `(block, first bit, width)`.
+    fn burn(&mut self, (block, bit, width): (usize, usize, usize), value: u32) {
+        let start = BLOCK_LAYOUT[block].0;
+        for i in 0..width {
+            if (value >> i) & 1 != 0 {
+                let b = bit + i;
+                self.words[start + b / 32] |= 1 << (b % 32);
+            }
+        }
+    }
+
+    /// Calibration version 1, with the code each ADC gives at the calibration
+    /// point. ADC1 codes are stored as differences from the next attenuation's
+    /// (from 900 for attenuation 3), ADC2 codes as differences from ADC1's.
+    fn burn_adc_calibration(&mut self) {
+        self.burn(BLK_VERSION_MAJOR, 1);
+        let adc1: [u32; 4] = core::array::from_fn(|a| sens::calibration_code(0, a as u32));
+        let adc2: [u32; 4] = core::array::from_fn(|a| sens::calibration_code(1, a as u32));
+        let diffs = [
+            adc1[0] - adc1[1] - 800,
+            adc1[1] - adc1[2] - 700,
+            adc1[2] - adc1[3] - 800,
+            adc1[3] - 900,
+            adc1[0] + 40 - adc2[0],
+            adc1[1] + 10 - adc2[1],
+            adc1[2] + 20 - adc2[2],
+            adc1[3] + 15 - adc2[3],
+        ];
+        for (field, diff) in ADC_CAL_CODE.into_iter().zip(diffs) {
+            self.burn(field, diff);
+        }
     }
 
     pub fn irq(&self) -> bool {
@@ -104,5 +155,41 @@ impl Efuse {
             _ => return false,
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn field(e: &Efuse, (block, bit, width): (usize, usize, usize)) -> u32 {
+        let start = BLOCK_LAYOUT[block].0;
+        (0..width).fold(0, |acc, i| {
+            let b = bit + i;
+            acc | (((e.words[start + b / 32] >> (b % 32)) & 1) << i)
+        })
+    }
+
+    #[test]
+    fn adc_calibration_decodes_to_the_model_codes() {
+        let e = Efuse::with_mac([0x7c, 0xdf, 0xa1, 0, 0, 1]);
+        assert_eq!(field(&e, BLK_VERSION_MAJOR), 1);
+        let d: Vec<u32> = ADC_CAL_CODE.iter().map(|&f| field(&e, f)).collect();
+        // Calibration version 1: codes from the stored differences.
+        let mut adc1 = [0; 4];
+        adc1[3] = d[3] + 900;
+        adc1[2] = d[2] + adc1[3] + 800;
+        adc1[1] = d[1] + adc1[2] + 700;
+        adc1[0] = d[0] + adc1[1] + 800;
+        let adc2 = [
+            adc1[0] - d[4] + 40,
+            adc1[1] - d[5] + 10,
+            adc1[2] - d[6] + 20,
+            adc1[3] - d[7] + 15,
+        ];
+        for a in 0..4 {
+            assert_eq!(adc1[a], sens::calibration_code(0, a as u32));
+            assert_eq!(adc2[a], sens::calibration_code(1, a as u32));
+        }
     }
 }

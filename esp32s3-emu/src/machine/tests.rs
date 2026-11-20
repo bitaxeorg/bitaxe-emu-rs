@@ -74,10 +74,11 @@ fn esp32s3_adc1_oneshot_codes() {
         "SAR_SARADC_MEAS_STATUS idle"
     );
 
-    // round(1150 * 4095 / 3100) = round(1519.11) = 1519.
+    // The line of ADC1 at attenuation 3 reads 1123 at 850 mV; 1150 mV sits at
+    // 1163.4 mV on it (v - deviation(v) = 1150): round(1163.4 * 1123 / 850) = 1537.
     let ctrl2 = adc1_convert(&mut soc, 1 << 1);
     assert_ne!(ctrl2 & MEAS1_DONE, 0, "conversion done at once");
-    assert_eq!(ctrl2 & MEAS1_DATA, 1519);
+    assert_eq!(ctrl2 & MEAS1_DATA, 1537);
     assert_eq!(
         (ctrl2 >> SAR1_EN_PAD_SHIFT) & 0xfff,
         1 << 1,
@@ -85,20 +86,15 @@ fn esp32s3_adc1_oneshot_codes() {
     );
     // Software cannot write DATA or DONE.
     write(&mut soc, SAR_MEAS1_CTRL2, ctrl2 | MEAS1_DATA);
-    assert_eq!(read(&mut soc, SAR_MEAS1_CTRL2) & MEAS1_DATA, 1519);
+    assert_eq!(read(&mut soc, SAR_MEAS1_CTRL2) & MEAS1_DATA, 1537);
     // Clearing START clears DONE.
     write(&mut soc, SAR_MEAS1_CTRL2, (1 << 1) << SAR1_EN_PAD_SHIFT);
     assert_eq!(read(&mut soc, SAR_MEAS1_CTRL2) & MEAS1_DONE, 0);
 
     // The calibration channel (15) does not fit the 12-bit pad field: no pad is
     // selected and the input is the 1100 mV reference.
-    // round(1100 * 4095 / 3100) = round(1453.06) = 1453.
-    let cal = adc1_convert(&mut soc, 0) & MEAS1_DATA;
-    assert_eq!(cal, 1453);
-    // The line calibration maps the code back to millivolts:
-    // gain = 1100 * 65536 / 1453 = 49614; 1519 * 49614 / 65536 = 1149.
-    let gain = 1100 * 65536 / cal;
-    assert_eq!(1519 * gain / 65536, 1149);
+    // 1100 mV sits at 1111.5 mV on the line: round(1111.5 * 1123 / 850) = 1469.
+    assert_eq!(adc1_convert(&mut soc, 0) & MEAS1_DATA, 1469);
 
     // Attenuation 0 (full scale 950 mV) clamps 1150 mV to 4095.
     write(&mut soc, SAR_ATTEN1, 3 << 30);
