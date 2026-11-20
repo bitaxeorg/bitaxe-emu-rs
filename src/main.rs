@@ -191,6 +191,16 @@ fn main() {
         for (a, n) in v.iter().take(40) {
             eprintln!("pc-sample {a:#010x} {n}");
         }
+        // The PCs themselves, without their callers.
+        let mut leaves = std::collections::BTreeMap::new();
+        for (chain, n) in samples {
+            *leaves.entry(chain[0]).or_insert(0u64) += n;
+        }
+        let mut v: Vec<_> = leaves.into_iter().collect();
+        v.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+        for (a, n) in v.iter().take(40) {
+            eprintln!("pc-leaf {a:#010x} {n}");
+        }
     }
     print!("{}", emulator.oled_ascii());
     if let Some(path) = &args.display_png
