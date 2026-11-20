@@ -5,8 +5,8 @@
 //! and writes, and accept jobs. Nonces are searched on the host at the
 //! difficulty of TICKET_MASK within a small hash budget per call of
 //! [`Chain::update`], which is far below what a real chip hashes: at the usual
-//! ticket difficulties a nonce is rare. Jobs made of midstates (BM1397) are
-//! counted but not hashed.
+//! ticket difficulties a nonce is rare. Jobs made of midstates (BM1397) keep the
+//! chips working (their power) but are not hashed.
 //!
 //! While a chip has work, its hash counters (one per domain and their total)
 //! advance at the rate of its PLL frequency and small cores, one count per 2^32
@@ -88,6 +88,12 @@ impl Asic {
 
     /// Jobs carry midstates instead of the block header.
     fn midstate_jobs(self) -> bool {
+        self == Asic::Bm1397
+    }
+
+    /// The PLL POSTDIV fields hold the dividers themselves (the later chips hold the
+    /// dividers minus one).
+    fn plain_post_div(self) -> bool {
         self == Asic::Bm1397
     }
 
@@ -188,13 +194,15 @@ struct Chip {
 }
 
 impl Chip {
-    /// Hash frequency in MHz (25 MHz reference and PLL0).
-    fn frequency_mhz(&self) -> f64 {
+    /// Hash frequency in MHz (25 MHz reference and PLL0). With `plain_post_div` the
+    /// POSTDIV fields hold the dividers, else the dividers minus one.
+    fn frequency_mhz(&self, plain_post_div: bool) -> f64 {
         let v = self.regs.get(&PLL0_PARAMETER).copied().unwrap_or(0);
         let fbdiv = f64::from((v >> 16) & 0xfff);
         let refdiv = f64::from((v >> 8) & 0x3f).max(1.0);
-        let post1 = f64::from(((v >> 4) & 7) + 1);
-        let post2 = f64::from((v & 7) + 1);
+        let extra = u32::from(!plain_post_div);
+        let post1 = f64::from(((v >> 4) & 7) + extra).max(1.0);
+        let post2 = f64::from((v & 7) + extra).max(1.0);
         25.0 * fbdiv / (refdiv * post1 * post2)
     }
 }
@@ -207,6 +215,8 @@ pub struct Chain {
     pub tx: VecDeque<u8>,
     jobs: BTreeMap<u8, Job>,
     current_job: Option<u8>,
+    /// The chips received a job since their reset.
+    has_work: bool,
     /// Chips held in reset (NRST low, or no core power).
     pub in_reset: bool,
     /// Hashes tried per [`Chain::update`].
@@ -227,6 +237,7 @@ impl Chain {
             tx: VecDeque::new(),
             jobs: BTreeMap::new(),
             current_job: None,
+            has_work: false,
             in_reset: true,
             hash_budget: 2000,
             hashes: 0,
@@ -261,6 +272,7 @@ impl Chain {
             self.chips = fresh;
             self.jobs.clear();
             self.current_job = None;
+            self.has_work = false;
             self.rx.clear();
         }
         self.in_reset = reset;
@@ -268,7 +280,10 @@ impl Chain {
 
     /// Hash frequency of the first chip, in MHz (25 MHz reference and PLL0).
     pub fn frequency_mhz(&self) -> f32 {
-        self.chips.first().map_or(0.0, |c| c.frequency_mhz() as f32)
+        let plain = self.asic.plain_post_div();
+        self.chips
+            .first()
+            .map_or(0.0, |c| c.frequency_mhz(plain) as f32)
     }
 
     /// Responses carry the version bits (11 bytes) once version rolling is on.
@@ -280,7 +295,7 @@ impl Chain {
 
     /// The chips have work.
     pub fn hashing(&self) -> bool {
-        !self.in_reset && self.current_job.is_some()
+        !self.in_reset && self.has_work
     }
 
     /// Bytes from the controller.
@@ -332,6 +347,7 @@ impl Chain {
                 crc16(&f[2..f.len() - 2]) == u16::from_be_bytes([f[f.len() - 2], f[f.len() - 1]]);
             if crc_ok && self.asic.midstate_jobs() {
                 self.jobs_received += 1;
+                self.has_work = true;
             } else if crc_ok && f.len() == 88 {
                 self.job(f);
             }
@@ -420,6 +436,7 @@ impl Chain {
             },
         );
         self.current_job = Some(job_id);
+        self.has_work = true;
         self.jobs_received += 1;
     }
 
@@ -480,8 +497,9 @@ impl Chain {
             return;
         }
         let per_mhz = self.asic.small_cores() * 1e6 / domains as f64 / HASHES_PER_COUNT;
+        let plain = self.asic.plain_post_div();
         for chip in &mut self.chips {
-            chip.count_frac += chip.frequency_mhz() * per_mhz * dt;
+            chip.count_frac += chip.frequency_mhz(plain) * per_mhz * dt;
             let whole = chip.count_frac.floor();
             chip.count_frac -= whole;
             let n = whole as u32;
@@ -580,6 +598,7 @@ mod tests {
             },
         );
         chain.current_job = Some(0);
+        chain.has_work = true;
         chain.update(20.0);
         // 525e6 × 2040 / 4 / 2^32 per second, for 10 s.
         let per_domain = 623;
@@ -591,5 +610,39 @@ mod tests {
         // A write clears a counter.
         chain.receive(&command(0x51, 0, 0x88, Some(0)));
         assert_eq!(read(&mut chain, 0x88), 0);
+    }
+
+    #[test]
+    fn midstate_jobs_keep_the_chips_working() {
+        let mut chain = Chain::new(Asic::Bm1397, 1);
+        chain.set_reset(false);
+        assert!(!chain.hashing());
+        // A job frame: header, length (the bytes after the preamble), payload, CRC-16.
+        let mut job = vec![0x55, 0xaa, CMD_JOB, 0x36];
+        job.resize(0x36, 0);
+        let crc = crc16(&job[2..]);
+        job.extend(crc.to_be_bytes());
+        chain.receive(&job);
+        assert_eq!(chain.jobs_received, 1);
+        assert!(chain.hashing());
+        chain.set_reset(true);
+        chain.set_reset(false);
+        assert!(!chain.hashing());
+    }
+
+    #[test]
+    fn bm1397_post_dividers_are_plain() {
+        // FBDIV 68, REFDIV 2, POSTDIV fields 2 and 1.
+        let pll = 0x4044_0221;
+        let mut max = Chain::new(Asic::Bm1397, 1);
+        max.set_reset(false);
+        max.receive(&command(0x51, 0, PLL0_PARAMETER, Some(pll)));
+        // 25 × 68 / (2 × 2 × 1)
+        assert_eq!(max.frequency_mhz(), 425.0);
+        let mut ultra = Chain::new(Asic::Bm1366, 1);
+        ultra.set_reset(false);
+        ultra.receive(&command(0x51, 0, PLL0_PARAMETER, Some(pll)));
+        // 25 × 68 / (2 × 3 × 2)
+        assert!((ultra.frequency_mhz() - 141.667).abs() < 0.01);
     }
 }
