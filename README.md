@@ -5,6 +5,12 @@ rest of the board is modelled around it. A window shows the front of the board
 with its display, buttons and fans, next to the board telemetry and the firmware
 logs.
 
+![The GammaHex running esp-miner-rs](docs/screenshots/gammahex.png)
+
+| Board menu | Firmware menu |
+|---|---|
+| ![The board menu](docs/screenshots/board-menu.png) | ![The firmware menu](docs/screenshots/firmware-menu.png) |
+
 The workspace has two crates:
 
 - [`esp32s3-emu`](esp32s3-emu/README.md): the ESP32-S3. Its processor is
@@ -50,44 +56,83 @@ The models:
 
 ## Running
 
-The development environment is the flake (the nightly Rust of
-`rust-toolchain.toml`, which BLIT needs, the Wayland libraries, the fonts and
-`espflash`): `direnv allow` (the local `.envrc` holds `use flake`), or prefix
-commands with `nix develop -c`.
+Start `bitaxe-emu` without arguments, from a terminal or from the desktop's
+application menu (the Nix package installs a launcher). The window opens on the
+board and firmware chosen last, the Gamma 601 with the latest esp-miner-rs CI
+build at first, and its menus change everything while it runs:
 
-```bash
-cargo build --release
-# Flash image of the firmware: bootloader, partition table and application.
-espflash save-image --chip esp32s3 --merge --flash-size 16mb \
-  --partition-table partitions.csv esp-miner-rs esp-miner-rs-bitaxe-601.bin
-target/release/bitaxe-emu --flash esp-miner-rs-bitaxe-601.bin --elf esp-miner-rs
-```
-
-- `--board` picks the board, by number (`601`) or family name (`gamma`, the
-  latest revision, as the firmware's features). Without it, the board number in
-  the flash or ELF file name is used (`...bitaxe-601...`, as CI names its images).
-- `--elf` gives the firmware's defmt logs (read from RTT) and is optional.
-- `--rom` points to the ESP32-S3 ROM image (`esp32s3_rev0_rom.bin`, shipped with
-  Espressif's QEMU). It defaults to the path in `ESP32S3_ROM` at build time
-  (the Nix package sets it), else to `../upstream/qemu-espressif/pc-bios/`.
-- `--persist` writes the flash back to the image when the window closes, keeping
-  the settings the firmware saved.
-- `--headless <seconds>` runs without a window and prints the logs, then the
-  OLED as text; `--display-png <file>` also saves the display's image.
+| Menu | Choices |
+|---|---|
+| The board name | every board number, by family; the chip restarts on the new board |
+| The firmware | the newest esp-miner-rs CI build for the board, or the newest ESP-Miner CI factory image, each of a branch; or a flash image file, with the ELF of the application for its defmt logs (by default the image's path with `.elf`) |
+| Settings | the ESP32-S3 ROM image and the MAC address (the chip restarts with them); whether the flash is written back to its file when the emulator stops; saving the display's image as PNG |
 
 Click RESET to restart the chip. BOOT is held as long as the mouse button is.
+The choices are kept in `~/.config/bitaxe-emu/choice`.
+
+### CI builds
+
+The emulator looks up the newest run of the firmware's CI on the branch that
+holds the build (`esp-miner-rs-bitaxe-<board>` for esp-miner-rs, `esp-miner-factory.bin`
+for ESP-Miner), downloads it once into `~/.cache/bitaxe-emu`, and uses the cache
+when GitHub cannot be reached. GitHub serves CI artifacts to authenticated
+clients only: the token comes from `GH_TOKEN`, `GITHUB_TOKEN`, or the GitHub CLI
+(`gh auth login`).
+
+The esp-miner-rs CI keeps the application image and its ELF. The emulator adds
+the ESP32-S3 2nd-stage bootloader (`assets/esp32s3-bootloader.bin`, the one
+`espflash save-image --merge --flash-size 16mb` writes) and the partition table
+of the run's `firmware/partitions.csv` to make the flash.
+
+### Options
+
+Every option has an environment variable, and the window's menus change them
+while it runs (except the run modes, `--headless` and `--display-png` after it).
+An option or its variable overrides the choice kept from the window.
+
+| Option | Variable | Window |
+|---|---|---|
+| `--board <number or family>` (`601`, `gamma`...; by default the number in the flash or ELF file name, `...bitaxe-601...`) | `BITAXE_EMU_BOARD` | board menu |
+| `--flash <image>` (bootloader, partition table and application, `espflash save-image --merge`) | `BITAXE_EMU_FLASH` | firmware menu, Flash image |
+| `--elf <file>` | `BITAXE_EMU_ELF` | firmware menu, ELF |
+| `--firmware esp-miner-rs\|esp-miner` (the newest CI build) | `BITAXE_EMU_FIRMWARE` | firmware menu, CI |
+| `--branch <name>` (`main` for esp-miner-rs, `master` for ESP-Miner) | `BITAXE_EMU_BRANCH` | firmware menu, branch |
+| `--rom <file>` (by default the image of the build: `ESP32S3_ROM` at build time, which the Nix package sets, else `../upstream/qemu-espressif/pc-bios/esp32s3_rev0_rom.bin`) | `BITAXE_EMU_ROM` | Settings |
+| `--mac <address>` (default `7c:df:a1:0b:17:ae`) | `BITAXE_EMU_MAC` | Settings |
+| `--persist [true\|false]` (write the flash back to its file when the emulator stops, keeping the settings the firmware saved) | `BITAXE_EMU_PERSIST` | Settings |
+| `--display-png <file>` (where to save the display's image) | `BITAXE_EMU_DISPLAY_PNG` | Settings, Save as PNG |
+| `--headless <seconds>` (run without a window, print the logs and the OLED as text) | `BITAXE_EMU_HEADLESS` | — |
+
+```bash
+# A local build of esp-miner-rs, headless for 10 s:
+espflash save-image --chip esp32s3 --merge --flash-size 16mb \
+  --partition-table partitions.csv esp-miner-rs esp-miner-rs-bitaxe-601.bin
+bitaxe-emu --flash esp-miner-rs-bitaxe-601.bin --elf esp-miner-rs --headless 10
+# The newest esp-miner-rs CI build for the GammaHex:
+BITAXE_EMU_FIRMWARE=esp-miner-rs BITAXE_EMU_BOARD=1300 bitaxe-emu
+```
 
 Debugging aids, all optional: `BITAXE_EMU_SCRIPT="2.0:boot_down,4.6:boot_up,6:reset"`
 presses buttons at given times in headless runs, `BITAXE_EMU_MMIO_LOG=1` prints
 the last peripheral accesses, `BITAXE_EMU_PROFILE=1` samples the call chains,
 `ESP32S3_I2C_TRACE=1` traces the I2C command lists.
 
+### Building
+
+The development environment is the flake (the nightly Rust of
+`rust-toolchain.toml`, which BLIT needs, the Wayland libraries, the fonts and
+`espflash`): `direnv allow` (the local `.envrc` holds `use flake`), or prefix
+commands with `nix develop -c`. Then `cargo build --release` builds
+`target/release/bitaxe-emu`.
+
 ## Installing with Nix
 
 The flake also packages the emulator: `nix build` gives `result/bin/bitaxe-emu`
-and `result/bin/esp32s3-run`, and `nix run github:bitaxeorg/bitaxe-emu-rs --
---flash <image>` runs it. The package fetches the ESP32-S3 ROM image, so
-`--rom` is not needed.
+and `result/bin/esp32s3-run`, and `nix run github:bitaxeorg/bitaxe-emu-rs` runs
+it. The package fetches the ESP32-S3 ROM image, so `--rom` is not needed, and
+installs a desktop entry with its icon ("Bitaxe Emulator"). The window's title is
+"Bitaxe emulator"; it sets no Wayland app_id, so window rules match the title
+(Hyprland: `windowrule = float on, match:title ^(Bitaxe emulator)$`).
 
 On NixOS, with the system configuration in a flake:
 
@@ -134,6 +179,10 @@ its hash in `nix/package.nix`.
   while it is busy, and the window shows the speed.
 - The power, thermal and fan figures come from a simple model, not from
   measurements of each board.
+- ESP-Miner images boot through the bootloader and stop at the start of the
+  application: ESP-Miner runs on both cores with the octal PSRAM, while the
+  emulator models one core and no PSRAM. It also reads its board from NVS
+  settings that the CI image does not hold.
 
 ## Licenses
 
@@ -155,3 +204,7 @@ the boards' KiCad projects by `assets/render-boards.sh`:
 
 The pictures are built into the binary. Where a design has no display module or
 fan in its 3D models, the window places them where they mount.
+
+`assets/esp32s3-bootloader.bin` is the ESP-IDF 2nd-stage bootloader for the
+ESP32-S3 that espflash 4.6.0 writes with `--flash-size 16mb` (Apache-2.0); it is
+built into the binary too.

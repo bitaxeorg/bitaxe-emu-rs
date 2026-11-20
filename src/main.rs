@@ -4,57 +4,73 @@
 
 mod board;
 mod emu;
+mod firmware;
+mod github;
 mod gui;
 mod logs;
 
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::builder::BoolishValueParser;
+use clap::{Parser, ValueEnum};
 
+use crate::firmware::{Choice, Source};
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Ci {
+    /// The esp-miner-rs build for the board.
+    EspMinerRs,
+    /// The ESP-Miner factory image.
+    EspMiner,
+}
+
+/// Every option can also come from its environment variable. Without a flash
+/// image or a CI build, the emulator starts with the choices made last in the
+/// window, whose menus change them while it runs.
 #[derive(Parser)]
 #[command(about = "Bitaxe emulator")]
 struct Args {
     /// The board: its number (601, 1201...) or family name (max, ultra, hex,
     /// supra, gamma, gamma-duo, supra-hex, gamma-turbo, naja-duo, gamma-hex).
     /// By default, the number in the flash or ELF file name (`...bitaxe-601...`).
-    #[arg(long)]
+    #[arg(long, env = "BITAXE_EMU_BOARD")]
     board: Option<String>,
     /// Flash image: bootloader, partition table and application
     /// (`espflash save-image --merge`).
-    #[arg(long)]
-    flash: PathBuf,
-    /// ELF of the application, for its defmt logs over RTT.
-    #[arg(long)]
+    #[arg(long, env = "BITAXE_EMU_FLASH")]
+    flash: Option<PathBuf>,
+    /// ELF of the application, for its defmt logs over RTT. By default, the
+    /// flash image's path with the `.elf` extension, when it exists.
+    #[arg(long, env = "BITAXE_EMU_ELF")]
     elf: Option<PathBuf>,
-    /// ESP32-S3 internal ROM image.
-    #[arg(long, default_value = esp32s3_emu::DEFAULT_ROM)]
-    rom: PathBuf,
-    /// MAC address of the chip.
-    #[arg(long, default_value = "7c:df:a1:0b:17:ae")]
-    mac: String,
+    /// Run the newest CI build of a firmware (needs a GitHub token: GH_TOKEN,
+    /// GITHUB_TOKEN or `gh auth login`).
+    #[arg(long, env = "BITAXE_EMU_FIRMWARE", conflicts_with = "flash")]
+    firmware: Option<Ci>,
+    /// Branch of the CI build (main for esp-miner-rs, master for ESP-Miner).
+    #[arg(long, env = "BITAXE_EMU_BRANCH")]
+    branch: Option<String>,
+    /// ESP32-S3 internal ROM image. By default, the one of the build.
+    #[arg(long, env = "BITAXE_EMU_ROM")]
+    rom: Option<PathBuf>,
+    /// MAC address of the chip (default 7c:df:a1:0b:17:ae).
+    #[arg(long, env = "BITAXE_EMU_MAC")]
+    mac: Option<String>,
     /// Write the flash back to the image file when the emulator stops (keeps the
-    /// settings the firmware saved).
-    #[arg(long)]
-    persist: bool,
+    /// settings the firmware saved); `--persist false` turns it off.
+    #[arg(long, env = "BITAXE_EMU_PERSIST", num_args = 0..=1, default_missing_value = "true",
+          value_parser = BoolishValueParser::new())]
+    persist: Option<bool>,
     /// Run without window for this many emulated seconds, printing the logs.
-    #[arg(long)]
+    #[arg(long, env = "BITAXE_EMU_HEADLESS")]
     headless: Option<f64>,
-    /// After a headless run, save the display's image to this PNG file.
-    #[arg(long, alias = "oled-png")]
+    /// Where to save the display's image as PNG: after a headless run, or with
+    /// the window's Save button.
+    #[arg(long, env = "BITAXE_EMU_DISPLAY_PNG", alias = "oled-png")]
     display_png: Option<PathBuf>,
     /// Decode the RTT up-buffer 0 of a dump of the data RAM (from 0x3fc88000) and exit.
-    #[arg(long, hide = true)]
+    #[arg(long, env = "BITAXE_EMU_DECODE_RTT", hide = true)]
     decode_rtt: Option<PathBuf>,
-}
-
-fn parse_mac(s: &str) -> [u8; 6] {
-    let bytes: Vec<u8> = s
-        .split(':')
-        .filter_map(|b| u8::from_str_radix(b, 16).ok())
-        .collect();
-    bytes
-        .try_into()
-        .unwrap_or([0x7c, 0xdf, 0xa1, 0x0b, 0x17, 0xae])
 }
 
 fn main() {
@@ -63,92 +79,143 @@ fn main() {
         decode_rtt_dump(&std::fs::read(dump).unwrap(), &std::fs::read(elf).unwrap());
         return;
     }
-    let rom = std::fs::read(&args.rom)
-        .unwrap_or_else(|e| panic!("ROM image {}: {e}", args.rom.display()));
-    let flash = std::fs::read(&args.flash)
-        .unwrap_or_else(|e| panic!("flash image {}: {e}", args.flash.display()));
-    let elf = args
-        .elf
-        .as_ref()
-        .map(|p| std::fs::read(p).unwrap_or_else(|e| panic!("ELF {}: {e}", p.display())));
-    let spec = match &args.board {
-        Some(name) => board::spec::find(name),
-        None => board::spec::from_file_name(&args.flash)
+    let saved = Choice::load().unwrap_or_else(Choice::default_choice);
+    let source = match (&args.flash, args.firmware) {
+        (Some(flash), _) => Source::File {
+            flash: flash.clone(),
+            elf: args.elf.clone().or_else(|| firmware::elf_beside(flash)),
+        },
+        (None, Some(Ci::EspMinerRs)) => Source::EspMinerRs {
+            branch: args
+                .branch
+                .clone()
+                .unwrap_or_else(|| firmware::RS_BRANCH.into()),
+        },
+        (None, Some(Ci::EspMiner)) => Source::EspMiner {
+            branch: args
+                .branch
+                .clone()
+                .unwrap_or_else(|| firmware::IDF_BRANCH.into()),
+        },
+        (None, None) => saved.source.clone(),
+    };
+    let named = match &args.board {
+        Some(name) => {
+            let Some(spec) = board::spec::find(name) else {
+                eprintln!("unknown board {name}: --board {}", board::spec::list());
+                std::process::exit(2);
+            };
+            Some(spec)
+        }
+        None => args
+            .flash
+            .as_deref()
+            .and_then(board::spec::from_file_name)
             .or_else(|| args.elf.as_deref().and_then(board::spec::from_file_name)),
     };
-    let Some(spec) = spec else {
+    let mac = match &args.mac {
+        Some(text) => firmware::parse_mac(text).unwrap_or_else(|| {
+            eprintln!("bad MAC address {text}: write it 7c:df:a1:0b:17:ae");
+            std::process::exit(2);
+        }),
+        None => saved.mac,
+    };
+    let choice = Choice {
+        board: named.unwrap_or(saved.board),
+        source,
+        rom: args.rom.clone().unwrap_or(saved.rom),
+        mac,
+        persist: args.persist.unwrap_or(saved.persist),
+    };
+    let Some(seconds) = args.headless else {
+        choice.save();
+        gui::run(gui::Launch {
+            choice,
+            display_png: args.display_png.clone(),
+        });
+        return;
+    };
+    if named.is_none() && args.flash.is_some() {
         eprintln!("which board? --board {}", board::spec::list());
         std::process::exit(2);
-    };
-    let mut board = board::Board::new(spec, rom, flash, parse_mac(&args.mac));
-    if args.persist {
-        board.flash_path = Some(args.flash.clone());
     }
-    let mut emulator = emu::Emulator::new(board, elf.as_deref());
+    let rom = std::fs::read(&choice.rom).unwrap_or_else(|e| {
+        eprintln!("ROM image {}: {e}", choice.rom.display());
+        std::process::exit(1);
+    });
+    let image = choice
+        .source
+        .load(choice.board, &mut |line| eprintln!("{line}"))
+        .unwrap_or_else(|e| {
+            eprintln!("ERROR {e}");
+            std::process::exit(1);
+        });
+    let mut board = board::Board::new(choice.board, rom, image.flash, choice.mac);
+    if choice.persist {
+        board.flash_path = image.path;
+    }
+    let mut emulator = emu::Emulator::new(board, image.elf.as_deref());
     if std::env::var_os("BITAXE_EMU_MMIO_LOG").is_some() {
         emulator.board.machine.soc.mmio_log = Some(Default::default());
         emulator.board.machine.soc.mmio_log_cap = 1 << 24;
     }
-    match args.headless {
-        Some(seconds) => {
-            emulator.run_headless(seconds);
-            emulator.board.save_flash();
-            if let Some(samples) = emulator.pc_samples.as_ref() {
-                let mut v: Vec<_> = samples.iter().collect();
-                v.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
-                // Callers aggregated: count by each function address of the chains.
-                let mut by_addr = std::collections::BTreeMap::new();
-                for (chain, n) in samples {
-                    let mut seen = std::collections::BTreeSet::new();
-                    for a in chain {
-                        if seen.insert(*a) {
-                            *by_addr.entry(*a).or_insert(0u64) += n;
-                        }
-                    }
-                }
-                let mut v: Vec<_> = by_addr.into_iter().collect();
-                v.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
-                for (a, n) in v.iter().take(40) {
-                    eprintln!("pc-sample {a:#010x} {n}");
-                }
-            }
-            print!("{}", emulator.oled_ascii());
-            if let Some(path) = &args.display_png {
-                save_display_png(&mut emulator, path);
-            }
-            let cpu = &emulator.board.machine.cpu;
-            eprintln!(
-                "pc {:#010x} a0 {:#010x} a1 {:#010x} ps {:#x} intenable {:#x} interrupt {:#x}",
-                cpu.pc,
-                cpu.a(0),
-                cpu.a(1),
-                cpu.ps(),
-                cpu.sr[228],
-                cpu.sr[226]
-            );
-            // Live call chain: a0 of each frame of the register windows.
-            let wb = cpu.sr[72];
-            let ws = cpu.sr[73];
-            let mut chain = Vec::new();
-            for k in 0..16u32 {
-                let frame = (wb + 16 - k) % 16;
-                if ws & (1 << frame) != 0 {
-                    let a0 = cpu.ar[(frame * 4) as usize];
-                    chain.push(format!("{:#010x}", (a0 & 0x3fff_ffff) | 0x4000_0000));
-                }
-            }
-            eprintln!("frames (a0): {}", chain.join(" "));
-            if let Some(log) = emulator.board.machine.soc.mmio_log.as_ref() {
-                let mut last = None;
-                for &(a, v, w) in log.iter() {
-                    if last != Some((a, v, w)) {
-                        eprintln!("mmio {} {a:#010x} {v:#010x}", if w { "W" } else { "R" });
-                    }
-                    last = Some((a, v, w));
+    emulator.run_headless(seconds);
+    emulator.board.save_flash();
+    if let Some(samples) = emulator.pc_samples.as_ref() {
+        let mut v: Vec<_> = samples.iter().collect();
+        v.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
+        // Callers aggregated: count by each function address of the chains.
+        let mut by_addr = std::collections::BTreeMap::new();
+        for (chain, n) in samples {
+            let mut seen = std::collections::BTreeSet::new();
+            for a in chain {
+                if seen.insert(*a) {
+                    *by_addr.entry(*a).or_insert(0u64) += n;
                 }
             }
         }
-        None => gui::run(emulator),
+        let mut v: Vec<_> = by_addr.into_iter().collect();
+        v.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+        for (a, n) in v.iter().take(40) {
+            eprintln!("pc-sample {a:#010x} {n}");
+        }
+    }
+    print!("{}", emulator.oled_ascii());
+    if let Some(path) = &args.display_png
+        && let Err(e) = emulator.save_display_png(path)
+    {
+        eprintln!("{e}");
+    }
+    let cpu = &emulator.board.machine.cpu;
+    eprintln!(
+        "pc {:#010x} a0 {:#010x} a1 {:#010x} ps {:#x} intenable {:#x} interrupt {:#x}",
+        cpu.pc,
+        cpu.a(0),
+        cpu.a(1),
+        cpu.ps(),
+        cpu.sr[228],
+        cpu.sr[226]
+    );
+    // Live call chain: a0 of each frame of the register windows.
+    let wb = cpu.sr[72];
+    let ws = cpu.sr[73];
+    let mut chain = Vec::new();
+    for k in 0..16u32 {
+        let frame = (wb + 16 - k) % 16;
+        if ws & (1 << frame) != 0 {
+            let a0 = cpu.ar[(frame * 4) as usize];
+            chain.push(format!("{:#010x}", (a0 & 0x3fff_ffff) | 0x4000_0000));
+        }
+    }
+    eprintln!("frames (a0): {}", chain.join(" "));
+    if let Some(log) = emulator.board.machine.soc.mmio_log.as_ref() {
+        let mut last = None;
+        for &(a, v, w) in log.iter() {
+            if last != Some((a, v, w)) {
+                eprintln!("mmio {} {a:#010x} {v:#010x}", if w { "W" } else { "R" });
+            }
+            last = Some((a, v, w));
+        }
     }
 }
 
@@ -167,28 +234,4 @@ fn decode_rtt_dump(dram: &[u8], elf: &[u8]) {
     for line in logs.decode(&dram[o..o + wr as usize]) {
         println!("{line}");
     }
-}
-
-/// Saves the display's image, scaled up (4x for the OLED, 2x for the LCD).
-fn save_display_png(emulator: &mut emu::Emulator, path: &std::path::Path) {
-    let (rgba, w, h) = emulator.display_image();
-    let (w, h) = (w as usize, h as usize);
-    let scale = if w > 200 { 2 } else { 4 };
-    let mut rgb = vec![0u8; w * scale * h * scale * 3];
-    for y in 0..h * scale {
-        for x in 0..w * scale {
-            let i = ((y / scale) * w + x / scale) * 4;
-            let o = (y * w * scale + x) * 3;
-            rgb[o..o + 3].copy_from_slice(&rgba[i..i + 3]);
-        }
-    }
-    let file = std::fs::File::create(path).expect("PNG file");
-    let mut enc = png::Encoder::new(
-        std::io::BufWriter::new(file),
-        (w * scale) as u32,
-        (h * scale) as u32,
-    );
-    enc.set_color(png::ColorType::Rgb);
-    enc.set_depth(png::BitDepth::Eight);
-    enc.write_header().unwrap().write_image_data(&rgb).unwrap();
 }

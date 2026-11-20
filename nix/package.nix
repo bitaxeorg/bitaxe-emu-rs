@@ -3,6 +3,8 @@
   makeRustPlatform,
   rust-bin,
   fetchurl,
+  copyDesktopItems,
+  makeDesktopItem,
   pkg-config,
   removeReferencesTo,
   zstd,
@@ -51,6 +53,7 @@ rustPlatform.buildRustPackage {
       ../src
       ../esp32s3-emu
       (lib.fileset.fileFilter (file: file.hasExt "png") ../assets)
+      ../assets/esp32s3-bootloader.bin
     ];
   };
 
@@ -67,6 +70,7 @@ rustPlatform.buildRustPackage {
   '';
 
   nativeBuildInputs = [
+    copyDesktopItems
     pkg-config
     removeReferencesTo
   ];
@@ -81,6 +85,32 @@ rustPlatform.buildRustPackage {
     BITAXE_EMU_FONT_MONO = "${fonts}/DejaVuSansMono.ttf";
     ESP32S3_ROM = "${rom}";
   };
+
+  # The launcher entry; its window has the title "Bitaxe emulator".
+  desktopItems = [
+    (makeDesktopItem {
+      name = "bitaxe-emu";
+      desktopName = "Bitaxe Emulator";
+      genericName = "Bitaxe board emulator";
+      comment = "Run Bitaxe miner firmware on an emulated board";
+      exec = "bitaxe-emu";
+      icon = "bitaxe-emu";
+      categories = [
+        "Development"
+        "Emulator"
+      ];
+      keywords = [
+        "bitaxe"
+        "bitcoin"
+        "esp32"
+        "miner"
+      ];
+    })
+  ];
+
+  postInstall = ''
+    install -Dm644 ${../assets/bitaxe-emu.svg} $out/share/icons/hicolor/scalable/apps/bitaxe-emu.svg
+  '';
 
   # The rax source paths left in panic messages are not a run-time dependency.
   # The RPATH is extended after the fixup, which drops the entries no DT_NEEDED

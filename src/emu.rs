@@ -2,6 +2,7 @@
 //! (buttons), and publishes snapshots of what the board shows.
 
 use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -21,6 +22,10 @@ const LCD_DARK: [u8; 4] = [0x02, 0x02, 0x03, 0xff];
 pub enum Command {
     BootButton(bool),
     Reset,
+    /// Write the flash back to its file when the emulator stops, or not.
+    Persist(bool),
+    /// Save the display's image to a PNG file.
+    SaveDisplay(PathBuf),
     Quit,
 }
 
@@ -36,6 +41,8 @@ pub struct Frame {
 
 #[derive(Clone, Default)]
 pub struct Snapshot {
+    /// The firmware running.
+    pub firmware: String,
     pub display: Frame,
     pub seconds: f64,
     /// Emulation speed relative to real time.
@@ -69,23 +76,27 @@ pub struct Emulator {
     display_generation: u64,
     /// PC at the end of each slice, counted, when profiling.
     pub pc_samples: Option<std::collections::BTreeMap<Vec<u32>, u64>>,
+    /// The file the flash came from, for [`Command::Persist`].
+    pub flash_file: Option<PathBuf>,
 }
 
 impl Emulator {
     pub fn new(board: Board, elf: Option<&[u8]>) -> Self {
+        Self::with_snapshot(board, elf, Arc::new(Mutex::new(Snapshot::default())))
+    }
+
+    /// An emulator publishing into `snapshot`.
+    pub fn with_snapshot(board: Board, elf: Option<&[u8]>, snapshot: Arc<Mutex<Snapshot>>) -> Self {
         Emulator {
             board,
             logs: Logs::new(elf),
-            snapshot: Arc::new(Mutex::new(Snapshot::default())),
+            snapshot,
             console: Vec::new(),
             display_state: None,
             display_generation: 0,
             pc_samples: std::env::var_os("BITAXE_EMU_PROFILE").map(|_| Default::default()),
+            flash_file: None,
         }
-    }
-
-    pub fn snapshot(&self) -> Arc<Mutex<Snapshot>> {
-        self.snapshot.clone()
     }
 
     /// Runs for `seconds` of emulated time as fast as possible, printing the logs.
@@ -187,6 +198,34 @@ impl Emulator {
         }
     }
 
+    /// Saves the display's image, scaled up (4x for the OLED, 2x for the LCD).
+    pub fn save_display_png(&mut self, path: &Path) -> Result<(), String> {
+        let (rgba, w, h) = self.display_image();
+        let (w, h) = (w as usize, h as usize);
+        let scale = if w > 200 { 2 } else { 4 };
+        let mut rgb = vec![0u8; w * scale * h * scale * 3];
+        for y in 0..h * scale {
+            for x in 0..w * scale {
+                let i = ((y / scale) * w + x / scale) * 4;
+                let o = (y * w * scale + x) * 3;
+                rgb[o..o + 3].copy_from_slice(&rgba[i..i + 3]);
+            }
+        }
+        let error = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
+        let file = std::fs::File::create(path).map_err(|e| error(&e))?;
+        let mut encoder = png::Encoder::new(
+            std::io::BufWriter::new(file),
+            (w * scale) as u32,
+            (h * scale) as u32,
+        );
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .and_then(|mut writer| writer.write_image_data(&rgb))
+            .map_err(|e| error(&e))
+    }
+
     /// The source generation of the display and whether it is lit.
     fn display_state(&mut self) -> (u64, bool) {
         let lit = self.board.lcd_lit();
@@ -229,7 +268,7 @@ impl Emulator {
         periph.usb_serial_jtag.tx_out.clear();
         while let Some(pos) = self.console.iter().position(|&b| b == b'\n') {
             let line: Vec<u8> = self.console.drain(..=pos).collect();
-            let text = String::from_utf8_lossy(&line).trim_end().to_string();
+            let text = strip_ansi(String::from_utf8_lossy(&line).trim_end());
             if !text.is_empty() {
                 self.push_log(text);
             }
@@ -316,6 +355,22 @@ impl Emulator {
                         self.board.reset();
                         self.push_log("RESET button".into());
                     }
+                    Ok(Command::Persist(on)) => {
+                        self.board.flash_path = if on { self.flash_file.clone() } else { None };
+                        if on && self.flash_file.is_none() {
+                            self.push_log(
+                                "WARN the flash comes from a CI build, it has no file to write back to"
+                                    .into(),
+                            );
+                        }
+                    }
+                    Ok(Command::SaveDisplay(path)) => {
+                        let line = match self.save_display_png(&path) {
+                            Ok(()) => format!("Saved the display to {}", path.display()),
+                            Err(e) => format!("ERROR {e}"),
+                        };
+                        self.push_log(line);
+                    }
                     Ok(Command::Quit) | Err(TryRecvError::Disconnected) => return,
                     Err(TryRecvError::Empty) => break,
                 }
@@ -349,5 +404,38 @@ impl Emulator {
                 emu_start = self.board.machine.now;
             }
         }
+    }
+}
+
+/// `line` without its ANSI escape sequences (terminal colours).
+fn strip_ansi(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            out.push(c);
+            continue;
+        }
+        // CSI: ESC [ parameters, then a final byte in @..~.
+        if chars.clone().next() == Some('[') {
+            chars.next();
+            for c in chars.by_ref() {
+                if ('@'..='~').contains(&c) {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn strips_terminal_colours() {
+        assert_eq!(
+            super::strip_ansi("\x1b[0;31mE (316) octal_psram: no PSRAM\x1b[0m"),
+            "E (316) octal_psram: no PSRAM"
+        );
     }
 }
