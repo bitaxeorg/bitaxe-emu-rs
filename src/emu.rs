@@ -63,6 +63,8 @@ pub struct Snapshot {
     pub jobs: u64,
     pub nonces: u64,
     pub logs: VecDeque<String>,
+    /// Lines logged since the start, including those dropped from `logs`.
+    pub log_count: u64,
 }
 
 pub struct Emulator {
@@ -287,6 +289,7 @@ impl Emulator {
     fn push_log(&mut self, line: String) {
         let mut s = self.snapshot.lock().unwrap();
         s.logs.push_back(line);
+        s.log_count += 1;
         while s.logs.len() > LOG_LINES * 4 {
             s.logs.pop_front();
         }

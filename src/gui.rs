@@ -9,8 +9,11 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
-use blit::{Atom, AtomCx, Constraints, LogicalRect, NodeTarget, Sides, Size};
+use blit::{
+    Animation, AnimationOptions, Atom, AtomCx, Constraints, LogicalRect, NodeTarget, Sides, Size,
+};
 use blit_desktop::{Application, Config, DesktopContext, EventLoopProxy, Scope, cpu};
+use blit_gui::clip::BoundsClip;
 use blit_gui::color::Color;
 use blit_gui::image::{Image, ImageData, ImageFormat, ImageHandle, ImagePixels, ImageSampling};
 use blit_gui::mesh::{Mesh, MeshVertex};
@@ -21,6 +24,8 @@ use blit_gui::text::{FontId, Text, TextStyle};
 use blit_gui_widgets::interact;
 use blit_gui_widgets::layout::{Align, Sizing, absolute, flex};
 use blit_gui_widgets::popover::{Popover, PopoverState};
+use blit_gui_widgets::scroll::ScrollState;
+use blit_gui_widgets::scroll::uniform_list::UniformList;
 use blit_gui_widgets::text_input::{TextInput, TextInputState};
 use blit_text::{Family, FontData};
 
@@ -44,6 +49,8 @@ const SIDE_WIDTH: f32 = 640.0;
 const GAP: f32 = 18.0;
 /// Hit size of the buttons on the board picture, in its pixels.
 const BUTTON_SIZE: f32 = 52.0;
+/// Height of a line of the firmware logs.
+const LOG_LINE: f32 = 16.0;
 
 const BACKGROUND: Color = Color::rgb(0x12, 0x14, 0x18);
 const PANEL: Color = Color::rgb(0x1c, 0x1f, 0x26);
@@ -149,7 +156,9 @@ struct Session {
 static SESSION: Mutex<Option<Session>> = Mutex::new(None);
 
 fn log(snapshot: &Mutex<Snapshot>, line: String) {
-    snapshot.lock().unwrap().logs.push_back(line);
+    let mut s = snapshot.lock().unwrap();
+    s.logs.push_back(line);
+    s.log_count += 1;
 }
 
 impl Session {
@@ -279,6 +288,9 @@ struct App {
     rom: Field,
     mac: Field,
     png: Field,
+    logs_scroll: ScrollState,
+    /// [`Snapshot::log_count`] at the last frame.
+    seen_logs: u64,
 }
 
 /// Decodes a PNG to RGBA.
@@ -460,6 +472,8 @@ impl App {
         *SESSION.lock().unwrap() = Some(session);
         self.display = None;
         self.boot_pressed = false;
+        self.logs_scroll = ScrollState::new();
+        self.seen_logs = 0;
         self.choice = choice;
     }
 
@@ -790,6 +804,8 @@ impl Application for App {
             idf_branch,
             file,
             elf,
+            logs_scroll: ScrollState::new(),
+            seen_logs: 0,
         };
         *SESSION.lock().unwrap() = Some(session);
         app
@@ -1101,21 +1117,52 @@ impl Application for App {
             logs.child().insert(
                 Text::new("Firmware logs").style(TextStyle::new().size(14.0).color(ACCENT)),
             );
-            let visible = 34;
-            let skip = snap.logs.len().saturating_sub(visible);
-            for line in snap.logs.iter().skip(skip) {
-                let short: String = line.chars().take(110).collect();
-                let color = if line.starts_with("ERROR") {
-                    Color::rgb(0xff, 0x6b, 0x6b)
-                } else if line.starts_with("WARN") {
-                    Color::rgb(0xff, 0xc1, 0x4d)
-                } else {
-                    TEXT
-                };
-                logs.child().insert(
-                    Text::new(&short).style(TextStyle::new().font(MONO).size(12.0).color(color)),
-                );
+            // Follow new lines while the view is at the end.
+            let scroll = &mut self.logs_scroll;
+            if snap.log_count != self.seen_logs
+                && scroll.offset >= scroll.maximum_offset() - LOG_LINE / 2.0
+            {
+                scroll.scroll_to(f32::MAX, Animation::default(), AnimationOptions::new());
             }
+            self.seen_logs = snap.log_count;
+            logs.child().item(flex::item().grow()).build(
+                UniformList::new(scroll, snap.logs.iter())
+                    .item_extent(LOG_LINE)
+                    .scroll_speed(2.0)
+                    .scrollbar_thickness(6.0)
+                    .minimum_thumb_extent(24.0)
+                    .clip(BoundsClip)
+                    .build_scrollbar(
+                        |mut ui: Ui<'_>, line: &String| {
+                            let color = if line.starts_with("ERROR") {
+                                Color::rgb(0xff, 0x6b, 0x6b)
+                            } else if line.starts_with("WARN") {
+                                Color::rgb(0xff, 0xc1, 0x4d)
+                            } else {
+                                TEXT
+                            };
+                            let short: String = line.chars().take(400).collect();
+                            ui.insert(
+                                Text::new(&short)
+                                    .style(TextStyle::new().font(MONO).size(12.0).color(color)),
+                            );
+                        },
+                        |mut ui: Ui<'_>| {
+                            ui.insert(
+                                Rectangle::new()
+                                    .background(Color::rgb(0x1a, 0x1c, 0x22))
+                                    .radius(BorderRadius::uniform(3.0)),
+                            );
+                        },
+                        |mut ui: Ui<'_>, active: bool| {
+                            ui.insert(
+                                Rectangle::new()
+                                    .background(if active { ACCENT } else { MUTED })
+                                    .radius(BorderRadius::uniform(3.0)),
+                            );
+                        },
+                    ),
+            );
         }
         for (label, clicked, active) in clicks {
             self.button(label, clicked, active);
