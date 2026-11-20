@@ -10,7 +10,8 @@
 //!
 //! While a chip has work, its hash counters (one per domain and their total)
 //! advance at the rate of its PLL frequency and small cores, one count per 2^32
-//! hashes, as a healthy chip's do.
+//! hashes, as a healthy chip's do. The BM1397 has no such counters: it reports
+//! its hashrate in HASH_RATE instead, in hashes per second / 2^20.
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -23,6 +24,8 @@ const TICKET_MASK: u8 = 0x14;
 const DOMAIN_COUNTERS: [u8; 8] = [0x88, 0x89, 0x8a, 0x8b, 0xac, 0xad, 0xae, 0xaf];
 /// Sum of the domain counters.
 const TOTAL_COUNTER: u8 = 0x8c;
+/// Hashrate of a BM1397, hashes per second / 2^20.
+const HASH_RATE: u8 = 0x04;
 const VERSION_ROLLING: u8 = 0xa4;
 /// Hashes per count of the hash counters.
 const HASHES_PER_COUNT: f64 = 4_294_967_296.0;
@@ -490,10 +493,19 @@ impl Chain {
         }
     }
 
-    /// Adds `dt` seconds of hashing to the counters of every chip.
+    /// Adds `dt` seconds of hashing to the counters of every chip (sets the hashrate
+    /// register of a BM1397).
     fn count(&mut self, dt: f64) {
         let domains = self.asic.domains();
         if domains == 0 {
+            if self.asic == Asic::Bm1397 {
+                let plain = self.asic.plain_post_div();
+                let per_mhz = self.asic.small_cores() * 1e6 / f64::from(1u32 << 20);
+                for chip in &mut self.chips {
+                    let rate = (chip.frequency_mhz(plain) * per_mhz) as u32 & 0x7fff_ffff;
+                    chip.regs.insert(HASH_RATE, rate);
+                }
+            }
             return;
         }
         let per_mhz = self.asic.small_cores() * 1e6 / domains as f64 / HASHES_PER_COUNT;
@@ -644,5 +656,19 @@ mod tests {
         ultra.receive(&command(0x51, 0, PLL0_PARAMETER, Some(pll)));
         // 25 × 68 / (2 × 3 × 2)
         assert!((ultra.frequency_mhz() - 141.667).abs() < 0.01);
+    }
+
+    #[test]
+    fn bm1397_reports_its_hashrate() {
+        let mut chain = Chain::new(Asic::Bm1397, 1);
+        chain.set_reset(false);
+        // 425 MHz
+        chain.receive(&command(0x51, 0, PLL0_PARAMETER, Some(0x4044_0221)));
+        chain.update(0.0);
+        assert_eq!(read(&mut chain, HASH_RATE), 0, "no work, no hashrate");
+        chain.has_work = true;
+        chain.update(1.0);
+        // 425 MHz × 672 small cores / 2^20
+        assert_eq!(read(&mut chain, HASH_RATE), 272_369);
     }
 }
