@@ -283,6 +283,7 @@ struct App {
     settings_menu: PopoverState,
     rs_branch: Field,
     idf_branch: Field,
+    release: Field,
     file: Field,
     elf: Field,
     rom: Field,
@@ -557,15 +558,17 @@ impl App {
     /// its ELF.
     fn firmware_menu(&mut self, ui: Ui<'_>, text: &str) -> Option<Source> {
         let current = &self.choice.source;
-        let (is_rs, is_idf, is_file) = (
+        let (is_rs, is_idf, is_release, is_file) = (
             matches!(current, Source::EspMinerRs { .. }),
             matches!(current, Source::EspMiner { .. }),
+            matches!(current, Source::EspMinerRelease { .. }),
             matches!(current, Source::File { .. }),
         );
         let text = format!("{text} ▾");
-        let (rs_branch, idf_branch, file, elf) = (
+        let (rs_branch, idf_branch, release, file, elf) = (
             &mut self.rs_branch,
             &mut self.idf_branch,
+            &mut self.release,
             &mut self.file,
             &mut self.elf,
         );
@@ -577,9 +580,10 @@ impl App {
                     let mut menu = ui.layout(flex::column().gap(10.0)).pad(14.0);
                     menu.insert(menu_frame());
                     let mut picked = None;
-                    let rows: [(&str, bool, &str, &mut Field, f32, &str); 3] = [
+                    let rows: [(&str, bool, &str, &mut Field, f32, &str); 4] = [
                         ("esp-miner-rs CI", is_rs, "branch", rs_branch, 160.0, firmware::RS_BRANCH),
                         ("ESP-Miner CI", is_idf, "branch", idf_branch, 160.0, firmware::IDF_BRANCH),
+                        ("ESP-Miner release", is_release, "version", release, 160.0, firmware::LATEST),
                         ("Flash image", is_file, "file", file, 380.0, "~/esp-miner-rs-bitaxe-601.bin"),
                     ];
                     let mut file_submitted = false;
@@ -607,6 +611,9 @@ impl App {
                             }),
                             1 => Some(Source::EspMiner {
                                 branch: if text.is_empty() { firmware::IDF_BRANCH.into() } else { text },
+                            }),
+                            2 => Some(Source::EspMinerRelease {
+                                tag: if text.is_empty() { firmware::LATEST.into() } else { text },
                             }),
                             _ => {
                                 file_submitted = true;
@@ -763,11 +770,15 @@ impl Application for App {
                 branch(firmware::RS_BRANCH, None),
                 branch(firmware::IDF_BRANCH, Some(b)),
             ),
-            Source::File { .. } => (
+            Source::File { .. } | Source::EspMinerRelease { .. } => (
                 branch(firmware::RS_BRANCH, None),
                 branch(firmware::IDF_BRANCH, None),
             ),
         };
+        let release = Field::new(match &choice.source {
+            Source::EspMinerRelease { tag } => tag.as_str(),
+            _ => firmware::LATEST,
+        });
         let (file, elf) = match &choice.source {
             Source::File { flash, elf } => (
                 Field::new(flash.display().to_string()),
@@ -802,6 +813,7 @@ impl Application for App {
             settings_menu: PopoverState::new(),
             rs_branch,
             idf_branch,
+            release,
             file,
             elf,
             logs_scroll: ScrollState::new(),

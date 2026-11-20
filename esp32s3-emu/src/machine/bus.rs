@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::devices::cache::MMU_ENTRIES;
 use crate::devices::gdma::DmaMemory;
 use crate::devices::{GDMA_BASE, Peripherals};
 use rax::isa::xtensa::XtensaBus;
@@ -42,6 +43,8 @@ pub struct Soc {
     pub rtc_slow: Vec<u8>,
     pub rtc_fast: Vec<u8>,
     pub periph: Peripherals,
+    /// The core executing: 0 for PRO_CPU, 1 for APP_CPU.
+    pub core: usize,
     /// Unmodelled peripheral registers: address → (reads, writes).
     pub unmodelled: BTreeMap<u32, (u64, u64)>,
     /// When set, every peripheral access: (address, value, write), oldest first.
@@ -55,6 +58,9 @@ pub struct Soc {
     cycle_ticks: u64,
     /// Instruction count at the last [`XtensaBus::sync`].
     icount: u64,
+    /// Latest time a peripheral access used: the cores run each slice in
+    /// turn, and the peripherals must not see time go back.
+    time_floor: u64,
     last_lines: u32,
     /// The last 4 KB page fetched from: its address, region and offset of the
     /// page in the region.
@@ -67,6 +73,7 @@ enum Region {
     Rom,
     Sram,
     Flash,
+    Psram,
     RtcSlow,
     RtcFast,
 }
@@ -81,6 +88,7 @@ impl Soc {
             rtc_slow: vec![0; RTC_MEM_SIZE],
             rtc_fast: vec![0; RTC_MEM_SIZE],
             periph,
+            core: 0,
             unmodelled: BTreeMap::new(),
             mmio_log: None,
             mmio_log_cap: 4096,
@@ -88,6 +96,7 @@ impl Soc {
             slice_ticks: 0,
             cycle_ticks: 60,
             icount: 0,
+            time_floor: 0,
             last_lines: 0,
             fetch_page: None,
         }
@@ -98,6 +107,7 @@ impl Soc {
             Region::Rom => &self.rom,
             Region::Sram => &self.sram,
             Region::Flash => &self.periph.flash.data,
+            Region::Psram => &self.periph.psram.data,
             Region::RtcSlow => &self.rtc_slow,
             Region::RtcFast => &self.rtc_fast,
         }
@@ -114,8 +124,8 @@ impl Soc {
             }
             0x40 if page >= SRAM_I_BASE => (Region::Sram, (page - SRAM_I_BASE) as usize),
             0x40 => (Region::Rom, (page - IROM_BASE) as usize),
-            0x3c | 0x3d => (Region::Flash, self.cache_to_flash(page - DCACHE_BASE)?),
-            0x42 | 0x43 => (Region::Flash, self.cache_to_flash(page - ICACHE_BASE)?),
+            0x3c | 0x3d => self.cache_map(page - DCACHE_BASE)?,
+            0x42 | 0x43 => self.cache_map(page - ICACHE_BASE)?,
             0x50 => (Region::RtcSlow, (page - RTC_SLOW_BASE) as usize),
             0x60 if page >= RTC_FAST_BASE => (Region::RtcFast, (page - RTC_FAST_BASE) as usize),
             _ => return None,
@@ -143,31 +153,50 @@ impl Soc {
         self.slice_ticks + (self.icount - self.slice_icount) * self.cycle_ticks
     }
 
+    /// The time of a peripheral access: the executing core's time, or a
+    /// later one already seen by the peripherals.
+    fn access_time(&mut self) -> u64 {
+        let t = self.now().max(self.time_floor);
+        self.time_floor = t;
+        t
+    }
+
+    /// Latest time a peripheral access used.
+    pub fn time_floor(&self) -> u64 {
+        self.time_floor
+    }
+
     /// Ends the slice at instruction count `icount`, returning its time.
     pub fn end_slice(&mut self, icount: u64) -> u64 {
         self.icount = icount;
         self.now()
     }
 
-    /// The processor interrupt lines of PRO_CPU.
+    /// The processor interrupt lines of the executing core.
     pub fn irq_lines(&mut self) -> u32 {
-        let now = self.now();
-        let lines = self.periph.irq_lines(now);
+        let lines = self.periph.irq_lines(self.core);
         self.last_lines = lines;
         lines
     }
 
     // ---- memory ----
 
-    /// Flash offset of an address in an external memory window, if mapped to flash.
+    /// The memory (flash or PSRAM) and offset an address of an external memory
+    /// window maps to, if its MMU entry is valid.
     #[inline]
-    pub fn cache_to_flash(&self, offset: u32) -> Option<usize> {
+    fn cache_map(&self, offset: u32) -> Option<(Region, usize)> {
         let entry = self.periph.cache.mmu[(offset >> MMU_PAGE_BITS) as usize & 511];
-        if entry & (MMU_ENTRY_INVALID | MMU_ENTRY_PSRAM) != 0 {
+        if entry & MMU_ENTRY_INVALID != 0 {
             return None;
         }
         let page = (entry & MMU_ENTRY_PAGE) as usize;
-        Some((page << MMU_PAGE_BITS) | (offset as usize & ((1 << MMU_PAGE_BITS) - 1)))
+        let at = (page << MMU_PAGE_BITS) | (offset as usize & ((1 << MMU_PAGE_BITS) - 1));
+        let region = if entry & MMU_ENTRY_PSRAM != 0 {
+            Region::Psram
+        } else {
+            Region::Flash
+        };
+        Some((region, at))
     }
 
     /// Memory backing `addr` for `len` bytes, if it is RAM or ROM (not MMIO).
@@ -191,12 +220,12 @@ impl Soc {
                 }
             }
             0x3c | 0x3d => {
-                let off = self.cache_to_flash(addr - DCACHE_BASE)?;
-                (&self.periph.flash.data, off)
+                let (region, off) = self.cache_map(addr - DCACHE_BASE)?;
+                (self.region(region), off)
             }
             0x42 | 0x43 => {
-                let off = self.cache_to_flash(addr - ICACHE_BASE)?;
-                (&self.periph.flash.data, off)
+                let (region, off) = self.cache_map(addr - ICACHE_BASE)?;
+                (self.region(region), off)
             }
             0x50 => (&self.rtc_slow, (addr - RTC_SLOW_BASE) as usize),
             0x60 if addr >= RTC_FAST_BASE => (&self.rtc_fast, (addr - RTC_FAST_BASE) as usize),
@@ -212,6 +241,11 @@ impl Soc {
                 (&mut self.sram, (addr - SRAM_D_BASE) as usize)
             }
             0x40 if addr >= SRAM_I_BASE => (&mut self.sram, (addr - SRAM_I_BASE) as usize),
+            // Through the data window, PSRAM pages are writable; flash pages are not.
+            0x3c | 0x3d => match self.cache_map(addr - DCACHE_BASE)? {
+                (Region::Psram, off) => (&mut self.periph.psram.data, off),
+                _ => return None,
+            },
             0x50 => (&mut self.rtc_slow, (addr - RTC_SLOW_BASE) as usize),
             0x60 if addr >= RTC_FAST_BASE => (&mut self.rtc_fast, (addr - RTC_FAST_BASE) as usize),
             _ => return None,
@@ -249,7 +283,7 @@ impl Soc {
     }
 
     fn mmio_read(&mut self, addr: u32) -> u32 {
-        let now = self.now();
+        let now = self.access_time();
         let v = match self.periph.read(addr & !3, now) {
             Some(v) => v,
             None => {
@@ -275,7 +309,7 @@ impl Soc {
     }
 
     fn mmio_write(&mut self, addr: u32, value: u32, mask: u32) {
-        let now = self.now();
+        let now = self.access_time();
         let addr = addr & !3;
         let value = if mask == u32::MAX {
             value
@@ -291,38 +325,78 @@ impl Soc {
             self.unmodelled.entry(addr).or_default().1 += 1;
         }
         if (GDMA_BASE..GDMA_BASE + 0x1000).contains(&addr) && self.periph.gdma.needs_service() {
-            let mut sram = DmaSram(&mut self.sram);
-            if self.periph.gdma.service(&mut sram) {
+            let mut mem = DmaBus {
+                sram: &mut self.sram,
+                psram: &mut self.periph.psram.data,
+                mmu: &self.periph.cache.mmu,
+            };
+            if self.periph.gdma.service(&mut mem) {
                 self.periph.irq_dirty = true;
             }
         }
     }
 }
 
-/// Internal SRAM as the DMA engines see it: through its D-bus addresses only.
-struct DmaSram<'a>(&'a mut [u8]);
+/// Memory as the DMA engines see it: internal SRAM through its D-bus
+/// addresses, and PSRAM through the pages the MMU maps in the data window.
+struct DmaBus<'a> {
+    sram: &'a mut [u8],
+    psram: &'a mut [u8],
+    mmu: &'a [u32; MMU_ENTRIES],
+}
 
-impl DmaSram<'_> {
-    fn offset(&self, addr: u32, len: usize) -> Option<usize> {
-        let off = addr.checked_sub(SRAM_D_BASE)? as usize;
-        (off.checked_add(len)? <= self.0.len()).then_some(off)
+/// Where a DMA address lands: internal SRAM or PSRAM, and the offset.
+enum DmaTarget {
+    Sram(usize),
+    Psram(usize),
+}
+
+impl DmaBus<'_> {
+    fn target(&self, addr: u32, len: usize) -> Option<DmaTarget> {
+        if let Some(off) = addr.checked_sub(SRAM_D_BASE)
+            && (off as usize).checked_add(len)? <= self.sram.len()
+        {
+            return Some(DmaTarget::Sram(off as usize));
+        }
+        let offset = addr
+            .checked_sub(DCACHE_BASE)
+            .filter(|&o| o < CACHE_WINDOW)?;
+        let entry = self.mmu[(offset >> MMU_PAGE_BITS) as usize & (MMU_ENTRIES - 1)];
+        if entry & MMU_ENTRY_INVALID != 0 || entry & MMU_ENTRY_PSRAM == 0 {
+            return None;
+        }
+        let page_off = offset as usize & ((1 << MMU_PAGE_BITS) - 1);
+        // A transfer may cross into the next pages when they map the next PSRAM
+        // pages.
+        let pages = (page_off + len).div_ceil(1 << MMU_PAGE_BITS);
+        let first = (offset >> MMU_PAGE_BITS) as usize;
+        for i in 1..pages {
+            let next = self.mmu.get(first + i)?;
+            if *next != entry + i as u32 {
+                return None;
+            }
+        }
+        let at = (((entry & MMU_ENTRY_PAGE) as usize) << MMU_PAGE_BITS) | page_off;
+        (at.checked_add(len)? <= self.psram.len()).then_some(DmaTarget::Psram(at))
     }
 }
 
-impl DmaMemory for DmaSram<'_> {
+impl DmaMemory for DmaBus<'_> {
     fn dma_read(&self, addr: u32, len: usize) -> Option<&[u8]> {
-        let off = self.offset(addr, len)?;
-        Some(&self.0[off..off + len])
+        match self.target(addr, len)? {
+            DmaTarget::Sram(off) => Some(&self.sram[off..off + len]),
+            DmaTarget::Psram(off) => Some(&self.psram[off..off + len]),
+        }
     }
 
     fn dma_write_u32(&mut self, addr: u32, value: u32) -> bool {
-        match self.offset(addr, 4) {
-            Some(off) => {
-                self.0[off..off + 4].copy_from_slice(&value.to_le_bytes());
-                true
-            }
-            None => false,
+        let bytes = value.to_le_bytes();
+        match self.target(addr, 4) {
+            Some(DmaTarget::Sram(off)) => self.sram[off..off + 4].copy_from_slice(&bytes),
+            Some(DmaTarget::Psram(off)) => self.psram[off..off + 4].copy_from_slice(&bytes),
+            None => return false,
         }
+        true
     }
 }
 

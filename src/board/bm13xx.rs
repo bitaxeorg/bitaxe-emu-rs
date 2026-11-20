@@ -68,6 +68,14 @@ impl Asic {
         }
     }
 
+    /// The CORE_NUM byte of the chip identification register.
+    fn core_num(self) -> u8 {
+        match self {
+            Asic::Bm1397 => 0x18,
+            _ => 0x00,
+        }
+    }
+
     /// Jobs carry midstates instead of the block header.
     fn midstate_jobs(self) -> bool {
         self == Asic::Bm1397
@@ -185,7 +193,10 @@ impl Chain {
 
     fn reset_chip(&self) -> Chip {
         let mut regs = BTreeMap::new();
-        regs.insert(CHIP_ID, u32::from(self.asic.chip_id()) << 16);
+        regs.insert(
+            CHIP_ID,
+            (u32::from(self.asic.chip_id()) << 16) | (u32::from(self.asic.core_num()) << 8),
+        );
         regs.insert(PLL0_PARAMETER, 0xc054_0165);
         regs.insert(TICKET_MASK, 0);
         Chip {
@@ -254,9 +265,11 @@ impl Chain {
             }
             let header = self.rx[2];
             let len = usize::from(self.rx[3]);
-            // The length byte of a header job leaves out the two hashes.
+            // A header job is 88 bytes. Its length byte counts the bytes after the
+            // preamble (86), or leaves out the two hashes as well (54).
             let total = match header {
                 CMD_JOB if self.asic.midstate_jobs() => len + 2,
+                CMD_JOB if len >= 86 => len + 2,
                 CMD_JOB => len + 34,
                 _ => len + 2,
             };

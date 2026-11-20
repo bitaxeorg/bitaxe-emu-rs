@@ -12,9 +12,10 @@
 //! waits in the channel for the peripheral OUT_PERI_SEL selects, which takes it
 //! ([`Gdma::take_out_data`]) and reports when it has sent it out
 //! ([`Gdma::finish_out`]); the channel then raises OUT_DONE, and OUT_EOF and
-//! OUT_TOTAL_EOF for a chain with SUC_EOF set. A descriptor or buffer outside
-//! internal SRAM, or a descriptor the CPU owns while OUT_CHECK_OWNER is set,
-//! raises OUT_DSCR_ERR. IN channels keep their registers and never transfer.
+//! OUT_TOTAL_EOF for a chain with SUC_EOF set. Descriptors and buffers are in
+//! internal SRAM or in PSRAM pages the MMU maps in the data window; one
+//! elsewhere, or a descriptor the CPU owns while OUT_CHECK_OWNER is set, raises
+//! OUT_DSCR_ERR. IN channels keep their registers and never transfer.
 
 /// Channels.
 pub const CHANNELS: usize = 5;

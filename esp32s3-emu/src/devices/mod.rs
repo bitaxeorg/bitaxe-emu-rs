@@ -13,6 +13,7 @@ pub mod gpio;
 pub mod i2c;
 pub mod intmatrix;
 pub mod lcd_cam;
+pub mod psram;
 pub mod regfile;
 pub mod rtc_cntl;
 pub mod sens;
@@ -31,6 +32,7 @@ use gpio::Gpio;
 use i2c::I2c;
 use intmatrix::{IntMatrix, SOURCES};
 use lcd_cam::LcdCam;
+use psram::Psram;
 use regfile::RegFile;
 use rtc_cntl::{ResetRequest, RtcCntl};
 use sens::Sens;
@@ -76,6 +78,8 @@ const SENS_END: u32 = 0xa00;
 pub struct PeripheralsConfig {
     /// Flash image (its size picks the flash capacity).
     pub flash: Vec<u8>,
+    /// Octal PSRAM size in bytes (0 for none).
+    pub psram: usize,
     pub efuse: Efuse,
     pub strap: u32,
 }
@@ -93,6 +97,7 @@ pub struct Peripherals {
     pub i2c: [I2c; 2],
     pub spi1: Spi1,
     pub flash: Flash,
+    pub psram: Psram,
     pub cache: Cache,
     pub sha: Sha,
     pub sens: Sens,
@@ -160,6 +165,7 @@ impl Peripherals {
             i2c: [I2c::new(), I2c::new()],
             spi1: Spi1::new(),
             flash: Flash::new(cfg.flash),
+            psram: Psram::new(cfg.psram),
             cache: Cache::new(),
             sha: Sha::new(),
             sens: Sens::new(),
@@ -207,6 +213,11 @@ impl Peripherals {
         self.rtc_cntl.pending_reset.take()
     }
 
+    /// The firmware asked for a reset.
+    pub fn reset_pending(&self) -> bool {
+        self.rtc_cntl.pending_reset.is_some()
+    }
+
     /// Ticks per CPU cycle.
     pub fn cycle_ticks(&self) -> u64 {
         TICK_HZ / self.system.cpu_hz()
@@ -239,9 +250,9 @@ impl Peripherals {
         l
     }
 
-    /// Interrupt lines of PRO_CPU.
-    pub fn irq_lines(&self, _now: u64) -> u32 {
-        self.intmatrix.lines(0, &self.source_levels())
+    /// Interrupt lines of `core` (0 PRO_CPU, 1 APP_CPU).
+    pub fn irq_lines(&self, core: usize) -> u32 {
+        self.intmatrix.lines(core, &self.source_levels())
     }
 
     /// Time of the next timed event after `now`, if any.
@@ -350,7 +361,7 @@ impl Peripherals {
             0x6_0010 => self.uart[1].write(off, v, now),
             0x6_002e => self.uart[2].write(off, v, now),
             0x6_0002 => {
-                self.spi1.write(off, v, &mut self.flash);
+                self.spi1.write(off, v, &mut self.flash, &mut self.psram);
                 false
             }
             0x6_0004 => self.gpio.write(off, v),

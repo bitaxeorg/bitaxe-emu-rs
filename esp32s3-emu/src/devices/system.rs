@@ -3,6 +3,11 @@
 
 use super::regfile::RegFile;
 
+/// APP_CPU control: bit 0 stalls it, bit 1 clocks it, bit 2 holds it in reset.
+const CORE_1_CONTROL_0: u32 = 0x000;
+const CORE_1_RUNSTALL: u32 = 1 << 0;
+const CORE_1_CLKGATE_EN: u32 = 1 << 1;
+const CORE_1_RESETING: u32 = 1 << 2;
 const CPU_PER_CONF: u32 = 0x010;
 const CPU_INTR_FROM_CPU_0: u32 = 0x030;
 const SYSCLK_CONF: u32 = 0x060;
@@ -10,6 +15,8 @@ const DATE: u32 = 0xffc;
 
 pub struct System {
     regs: RegFile,
+    /// APP_CPU was put in reset since the last [`System::take_app_reset`].
+    app_reset: bool,
 }
 
 impl Default for System {
@@ -21,6 +28,7 @@ impl Default for System {
 impl System {
     pub fn new() -> Self {
         let regs = RegFile::new("system", 0x1000)
+            .with_reset(CORE_1_CONTROL_0, CORE_1_RESETING)
             .with_reset(CPU_PER_CONF, 0x0000_000c)
             .with_reset(0x008, 0x0000_0001)
             .with_reset(0x018, 0xf9c1_e06f)
@@ -32,11 +40,26 @@ impl System {
             // PRE_DIV_CNT 0, SOC_CLK_SEL XTAL, CLK_XTAL_FREQ 40.
             .with_reset(SYSCLK_CONF, 0x0002_8000)
             .with_reset(DATE, 0x0210_1220);
-        System { regs }
+        System {
+            regs,
+            app_reset: true,
+        }
     }
 
     pub fn reset(&mut self) {
         self.regs.reset();
+        self.app_reset = true;
+    }
+
+    /// APP_CPU is clocked, out of reset and not stalled.
+    pub fn app_cpu_runs(&self) -> bool {
+        let c = self.regs.get(CORE_1_CONTROL_0);
+        c & CORE_1_CLKGATE_EN != 0 && c & (CORE_1_RUNSTALL | CORE_1_RESETING) == 0
+    }
+
+    /// Whether APP_CPU went through reset since the last call.
+    pub fn take_app_reset(&mut self) -> bool {
+        std::mem::take(&mut self.app_reset)
     }
 
     /// CPU clock in Hz.
@@ -90,6 +113,12 @@ impl System {
     pub fn write(&mut self, off: u32, v: u32) {
         let v = match off {
             o if (CPU_INTR_FROM_CPU_0..CPU_INTR_FROM_CPU_0 + 16).contains(&o) => v & 1,
+            CORE_1_CONTROL_0 => {
+                if v & CORE_1_RESETING != 0 {
+                    self.app_reset = true;
+                }
+                v
+            }
             DATE => return,
             _ => v,
         };

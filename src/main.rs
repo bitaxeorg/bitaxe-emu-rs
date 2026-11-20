@@ -19,9 +19,14 @@ use crate::firmware::{Choice, Source};
 #[derive(Clone, Copy, ValueEnum)]
 enum Ci {
     /// The esp-miner-rs build for the board.
-    EspMinerRs,
-    /// The ESP-Miner factory image.
-    EspMiner,
+    #[value(name = "esp-miner-rs")]
+    Rs,
+    /// The ESP-Miner CI factory image.
+    #[value(name = "esp-miner")]
+    Idf,
+    /// The board's factory image of an ESP-Miner release.
+    #[value(name = "esp-miner-release")]
+    Release,
 }
 
 /// Every option can also come from its environment variable. Without a flash
@@ -44,10 +49,11 @@ struct Args {
     #[arg(long, env = "BITAXE_EMU_ELF")]
     elf: Option<PathBuf>,
     /// Run the newest CI build of a firmware (needs a GitHub token: GH_TOKEN,
-    /// GITHUB_TOKEN or `gh auth login`).
+    /// GITHUB_TOKEN or `gh auth login`), or an ESP-Miner release.
     #[arg(long, env = "BITAXE_EMU_FIRMWARE", conflicts_with = "flash")]
     firmware: Option<Ci>,
-    /// Branch of the CI build (main for esp-miner-rs, master for ESP-Miner).
+    /// Branch of the CI build (main for esp-miner-rs, master for ESP-Miner), or
+    /// tag of the ESP-Miner release (latest by default).
     #[arg(long, env = "BITAXE_EMU_BRANCH")]
     branch: Option<String>,
     /// ESP32-S3 internal ROM image. By default, the one of the build.
@@ -85,17 +91,23 @@ fn main() {
             flash: flash.clone(),
             elf: args.elf.clone().or_else(|| firmware::elf_beside(flash)),
         },
-        (None, Some(Ci::EspMinerRs)) => Source::EspMinerRs {
+        (None, Some(Ci::Rs)) => Source::EspMinerRs {
             branch: args
                 .branch
                 .clone()
                 .unwrap_or_else(|| firmware::RS_BRANCH.into()),
         },
-        (None, Some(Ci::EspMiner)) => Source::EspMiner {
+        (None, Some(Ci::Idf)) => Source::EspMiner {
             branch: args
                 .branch
                 .clone()
                 .unwrap_or_else(|| firmware::IDF_BRANCH.into()),
+        },
+        (None, Some(Ci::Release)) => Source::EspMinerRelease {
+            tag: args
+                .branch
+                .clone()
+                .unwrap_or_else(|| firmware::LATEST.into()),
         },
         (None, None) => saved.source.clone(),
     };
@@ -186,28 +198,66 @@ fn main() {
     {
         eprintln!("{e}");
     }
-    let cpu = &emulator.board.machine.cpu;
-    eprintln!(
-        "pc {:#010x} a0 {:#010x} a1 {:#010x} ps {:#x} intenable {:#x} interrupt {:#x}",
-        cpu.pc,
-        cpu.a(0),
-        cpu.a(1),
-        cpu.ps(),
-        cpu.sr[228],
-        cpu.sr[226]
-    );
-    // Live call chain: a0 of each frame of the register windows.
-    let wb = cpu.sr[72];
-    let ws = cpu.sr[73];
-    let mut chain = Vec::new();
-    for k in 0..16u32 {
-        let frame = (wb + 16 - k) % 16;
-        if ws & (1 << frame) != 0 {
-            let a0 = cpu.ar[(frame * 4) as usize];
-            chain.push(format!("{:#010x}", (a0 & 0x3fff_ffff) | 0x4000_0000));
+    for (name, cpu) in [
+        ("PRO_CPU", &emulator.board.machine.cpu),
+        ("APP_CPU", &emulator.board.machine.app),
+    ] {
+        eprintln!(
+            "{name} pc {:#010x} a0 {:#010x} a1 {:#010x} ps {:#x} intenable {:#x} interrupt {:#x} waiting {}",
+            cpu.pc,
+            cpu.a(0),
+            cpu.a(1),
+            cpu.ps(),
+            cpu.sr[228],
+            cpu.sr[226],
+            cpu.waiting
+        );
+        // Live call chain: a0 of each frame of the register windows.
+        let wb = cpu.sr[72];
+        let ws = cpu.sr[73];
+        let mut chain = Vec::new();
+        for k in 0..16u32 {
+            let frame = (wb + 16 - k) % 16;
+            if ws & (1 << frame) != 0 {
+                let a0 = cpu.ar[(frame * 4) as usize];
+                chain.push(format!("{:#010x}", (a0 & 0x3fff_ffff) | 0x4000_0000));
+            }
+        }
+        eprintln!("{name} frames (a0): {}", chain.join(" "));
+        let regs: Vec<String> = (2..8).map(|i| format!("a{i} {:#010x}", cpu.a(i))).collect();
+        eprintln!("{name} {}", regs.join(" "));
+    }
+    // Memory dumps: "address:length:file,...".
+    for item in std::env::var("BITAXE_EMU_DUMP")
+        .unwrap_or_default()
+        .split(',')
+    {
+        let mut parts = item.splitn(3, ':');
+        let (Some(addr), Some(len), Some(file)) = (parts.next(), parts.next(), parts.next()) else {
+            continue;
+        };
+        let number = |s: &str| {
+            s.strip_prefix("0x")
+                .map_or_else(|| s.parse().ok(), |h| u32::from_str_radix(h, 16).ok())
+        };
+        let (Some(addr), Some(len)) = (number(addr), number(len)) else {
+            continue;
+        };
+        let bytes: Vec<u8> = (0..len)
+            .map(|i| {
+                emulator
+                    .board
+                    .machine
+                    .soc
+                    .read_bytes(addr.wrapping_add(i), 1)
+                    .map_or(0, |b| b[0])
+            })
+            .collect();
+        match std::fs::write(file, bytes) {
+            Ok(()) => eprintln!("dumped {len:#x} bytes at {addr:#010x} to {file}"),
+            Err(e) => eprintln!("{file}: {e}"),
         }
     }
-    eprintln!("frames (a0): {}", chain.join(" "));
     if let Some(log) = emulator.board.machine.soc.mmio_log.as_ref() {
         let mut last = None;
         for &(a, v, w) in log.iter() {

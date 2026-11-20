@@ -40,6 +40,9 @@ struct Args {
     /// Stop at the first exception.
     #[arg(long)]
     stop_on_exception: bool,
+    /// Octal PSRAM size, MB (0 for none).
+    #[arg(long, default_value_t = 8)]
+    psram_mb: usize,
 }
 
 fn rtt_address(elf: &[u8]) -> Option<u32> {
@@ -62,6 +65,7 @@ fn main() {
         rom,
         periph: PeripheralsConfig {
             flash,
+            psram: args.psram_mb << 20,
             efuse: Efuse::with_mac([0x7c, 0xdf, 0xa1, 0x00, 0x00, 0x01]),
             strap: STRAP_SPI_BOOT,
         },
@@ -120,8 +124,8 @@ fn main() {
     eprintln!(
         "\n{:.3} s emulated in {wall:.3} s: {} instructions ({:.1} MIPS), pc {:#010x}, {exceptions} exceptions",
         m.now as f64 / TICK_HZ as f64,
-        m.cpu.icount,
-        m.cpu.icount as f64 / wall / 1e6,
+        m.icount(),
+        m.icount() as f64 / wall / 1e6,
         m.cpu.pc
     );
     if !m.soc.unmodelled.is_empty() {

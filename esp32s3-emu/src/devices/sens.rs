@@ -2,15 +2,17 @@
 //! analog sensors.
 //!
 //! Registers read back what was written, apart from their read-only status
-//! fields, which read 0. ADC1 converts under software control: setting
-//! MEAS1_START_SAR samples the channel SAR1_EN_PAD selects and completes at
-//! once, with MEAS1_DONE_SAR set and the code in MEAS1_DATA_SAR; clearing
-//! MEAS1_START_SAR clears MEAS1_DONE_SAR. The board sets the input voltage of
-//! each channel ([`Sens::set_adc1_mv`]). ADC2, the touch sensor, the temperature
-//! sensor and the ULP coprocessor do not run.
+//! fields, which read 0. Both ADCs convert under software control: setting
+//! MEASn_START_SAR samples the channel SARn_EN_PAD selects and completes at
+//! once, with MEASn_DONE_SAR set and the code in MEASn_DATA_SAR; clearing
+//! MEASn_START_SAR clears MEASn_DONE_SAR. The board sets the input voltage of
+//! each ADC1 channel ([`Sens::set_adc1_mv`]); the ADC2 channels read 0 V. The
+//! touch sensor, the temperature sensor and the ULP coprocessor do not run.
 
 /// ADC1 input channels (channel `n` is GPIO `n + 1`).
 pub const ADC1_CHANNELS: usize = 10;
+/// ADC2 input channels (channel `n` is GPIO `n + 11`).
+pub const ADC2_CHANNELS: usize = 10;
 
 /// Input of a conversion with no pad selected: the internal reference, in mV.
 pub const ADC_REFERENCE_MV: u32 = 1100;
@@ -167,15 +169,20 @@ impl Sens {
                 let old = self.get(off);
                 let mut new = (old & ro) | (v & !ro);
                 if off == MEAS1_CTRL2 {
-                    new = self.meas1(old, new);
+                    new = self.meas(old, new, |s, pads| s.adc_code(pads, ATTEN1, &s.adc1_mv));
+                } else if off == MEAS2_CTRL2 {
+                    new = self.meas(old, new, |s, pads| {
+                        s.adc_code(pads, ATTEN2, &[0; ADC2_CHANNELS])
+                    });
                 }
                 self.set(off, new);
             }
         }
     }
 
-    /// SAR_MEAS1_CTRL2 after a write that changed it from `old` to `new`.
-    fn meas1(&self, old: u32, new: u32) -> u32 {
+    /// SAR_MEASn_CTRL2 after a write that changed it from `old` to `new`;
+    /// `convert` gives the code of the pads selected.
+    fn meas(&self, old: u32, new: u32, convert: impl Fn(&Self, u32) -> u32) -> u32 {
         if new & MEAS_START == 0 {
             return new & !MEAS_DONE;
         }
@@ -184,21 +191,22 @@ impl Sens {
         }
         // A rising edge of MEAS1_START_SAR starts a conversion.
         let pads = (new >> EN_PAD_SHIFT) & EN_PAD_MASK;
-        let code = self.adc1_code(pads);
+        let code = convert(self, pads);
         (new & !MEAS_DATA) | MEAS_DONE | code
     }
 
-    /// The code of an ADC1 conversion of the pads in the SAR1_EN_PAD bitmap
-    /// `pads` (the lowest one selected wins).
-    fn adc1_code(&self, pads: u32) -> u32 {
+    /// The code of a conversion of the pads in the SARn_EN_PAD bitmap `pads`
+    /// (the lowest one selected wins), with the attenuations of register
+    /// `atten_reg` and the channel inputs `inputs` (mV).
+    fn adc_code(&self, pads: u32, atten_reg: u32, inputs: &[u32]) -> u32 {
         let (channel, mv) = if pads == 0 {
             (CAL_CHANNEL, ADC_REFERENCE_MV)
         } else {
             let channel = pads.trailing_zeros();
-            let mv = self.adc1_mv.get(channel as usize).copied().unwrap_or(0);
+            let mv = inputs.get(channel as usize).copied().unwrap_or(0);
             (channel, mv)
         };
-        let atten = (self.get(ATTEN1) >> (2 * channel)) & 3;
+        let atten = (self.get(atten_reg) >> (2 * channel)) & 3;
         code(mv, atten)
     }
 }

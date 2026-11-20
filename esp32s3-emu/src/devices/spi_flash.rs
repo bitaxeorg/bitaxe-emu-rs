@@ -5,6 +5,7 @@
 //! user transactions (command, address, dummy, MOSI and MISO phases). Program
 //! and erase complete at once.
 
+use super::psram::Psram;
 use super::regfile::RegFile;
 
 const CMD: u32 = 0x000;
@@ -15,6 +16,8 @@ const USER2: u32 = 0x020;
 const MOSI_DLEN: u32 = 0x024;
 const MISO_DLEN: u32 = 0x028;
 const RD_STATUS: u32 = 0x02c;
+/// Chip select disables: bit 0 for the flash (CS0), bit 1 for the PSRAM (CS1).
+const MISC: u32 = 0x034;
 const W0: u32 = 0x058;
 const DATE: u32 = 0x3fc;
 
@@ -233,7 +236,7 @@ impl Spi1 {
         }
     }
 
-    pub fn write(&mut self, off: u32, v: u32, flash: &mut Flash) {
+    pub fn write(&mut self, off: u32, v: u32, flash: &mut Flash, psram: &mut Psram) {
         if off != CMD {
             if off != DATE {
                 self.regs.write(off, v);
@@ -256,7 +259,18 @@ impl Spi1 {
             } else {
                 0
             };
-            let data = flash.exec(opcode, addr, &mosi, miso);
+            let data = if self.regs.get(MISC) & 0b11 == 0b01 {
+                // CS1 alone: the PSRAM, with a command of up to 16 bits.
+                let user2 = self.regs.get(USER2);
+                let cmd = if (user2 >> 28) + 1 > 8 {
+                    user2 as u16
+                } else {
+                    u16::from(opcode)
+                };
+                psram.exec(cmd, addr.unwrap_or(0), &mosi, miso)
+            } else {
+                flash.exec(opcode, addr, &mosi, miso)
+            };
             if miso > 0 {
                 self.set_buffer(&data);
             }

@@ -71,7 +71,11 @@ pub struct Emulator {
     pub board: Board,
     logs: Logs,
     snapshot: Arc<Mutex<Snapshot>>,
-    console: Vec<u8>,
+    /// Console bytes of UART0 and of the USB-Serial-JTAG, until a line ends.
+    console: [Vec<u8>; 2],
+    /// Lines shown from one console that the other has not printed yet, by
+    /// console: the firmware may print each line on both.
+    unmatched: [std::collections::HashMap<String, u32>; 2],
     /// What the display showed at the last snapshot: its source generation and
     /// whether it was lit.
     display_state: Option<(u64, bool)>,
@@ -93,7 +97,8 @@ impl Emulator {
             board,
             logs: Logs::new(elf),
             snapshot,
-            console: Vec::new(),
+            console: Default::default(),
+            unmatched: Default::default(),
             display_state: None,
             display_generation: 0,
             pc_samples: std::env::var_os("BITAXE_EMU_PROFILE").map(|_| Default::default()),
@@ -142,7 +147,7 @@ impl Emulator {
             "{:.2} s emulated in {:.2} s ({:.0} MIPS)",
             s.seconds,
             started.elapsed().as_secs_f64(),
-            self.board.machine.cpu.icount as f64 / started.elapsed().as_secs_f64() / 1e6
+            self.board.machine.icount() as f64 / started.elapsed().as_secs_f64() / 1e6
         );
     }
 
@@ -266,13 +271,31 @@ impl Emulator {
             self.push_log(line);
         }
         let periph = self.board.machine.periph();
-        self.console.extend(periph.uart[0].tx_out.drain(..));
-        periph.usb_serial_jtag.tx_out.clear();
-        while let Some(pos) = self.console.iter().position(|&b| b == b'\n') {
-            let line: Vec<u8> = self.console.drain(..=pos).collect();
-            let text = strip_ansi(String::from_utf8_lossy(&line).trim_end());
-            if !text.is_empty() {
-                self.push_log(text);
+        let uart: Vec<u8> = periph.uart[0].tx_out.drain(..).collect();
+        let usb: Vec<u8> = periph.usb_serial_jtag.tx_out.drain(..).collect();
+        if let Some(prefix) = std::env::var_os("BITAXE_EMU_CONSOLE_DUMP") {
+            use std::io::Write;
+            for (ext, bytes) in [("uart", &uart), ("usb", &usb)] {
+                let mut path = prefix.clone();
+                path.push(format!(".{ext}"));
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                {
+                    let _ = f.write_all(bytes);
+                }
+            }
+        }
+        self.console[0].extend(uart);
+        self.console[1].extend(usb);
+        for source in 0..2 {
+            while let Some(pos) = self.console[source].iter().position(|&b| b == b'\n') {
+                let line: Vec<u8> = self.console[source].drain(..=pos).collect();
+                let text = strip_ansi(String::from_utf8_lossy(&line).trim_end());
+                if !text.is_empty() && self.first_copy(source, &text) {
+                    self.push_log(text);
+                }
             }
         }
         if let Some(cb) = self.logs.rtt() {
@@ -284,6 +307,26 @@ impl Emulator {
             }
         }
         self.publish();
+    }
+
+    /// Whether `line` from console `source` is new: false when the other
+    /// console already printed it.
+    fn first_copy(&mut self, source: usize, line: &str) -> bool {
+        let other = &mut self.unmatched[1 - source];
+        if let Some(n) = other.get_mut(line) {
+            *n -= 1;
+            if *n == 0 {
+                other.remove(line);
+            }
+            return false;
+        }
+        let own = &mut self.unmatched[source];
+        // A console the other does not mirror would grow this without bound.
+        if own.len() > 4096 {
+            own.clear();
+        }
+        *own.entry(line.to_string()).or_insert(0) += 1;
+        true
     }
 
     fn push_log(&mut self, line: String) {
@@ -347,7 +390,7 @@ impl Emulator {
         let mut emu_start = self.board.machine.now;
         let mut last_rate = (
             Instant::now(),
-            self.board.machine.cpu.icount,
+            self.board.machine.icount(),
             self.board.machine.now,
         );
         loop {
@@ -384,12 +427,12 @@ impl Emulator {
             let elapsed = last_rate.0.elapsed().as_secs_f64();
             if elapsed >= 1.0 {
                 let mut s = self.snapshot.lock().unwrap();
-                s.mips = (self.board.machine.cpu.icount - last_rate.1) as f64 / elapsed / 1e6;
+                s.mips = (self.board.machine.icount() - last_rate.1) as f64 / elapsed / 1e6;
                 s.speed = (self.board.machine.now - last_rate.2) as f64 / TICK_HZ as f64 / elapsed;
                 drop(s);
                 last_rate = (
                     Instant::now(),
-                    self.board.machine.cpu.icount,
+                    self.board.machine.icount(),
                     self.board.machine.now,
                 );
             }

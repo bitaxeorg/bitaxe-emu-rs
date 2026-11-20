@@ -64,7 +64,7 @@ build at first, and its menus change everything while it runs:
 | Menu | Choices |
 |---|---|
 | The board name | every board number, by family; the chip restarts on the new board |
-| The firmware | the newest esp-miner-rs CI build for the board, or the newest ESP-Miner CI factory image, each of a branch; or a flash image file, with the ELF of the application for its defmt logs (by default the image's path with `.elf`) |
+| The firmware | the newest esp-miner-rs CI build for the board, or the newest ESP-Miner CI factory image, each of a branch; the board's factory image of an ESP-Miner release (the newest by default), which holds the board settings and needs no token; or a flash image file, with the ELF of the application for its defmt logs (by default the image's path with `.elf`) |
 | Settings | the ESP32-S3 ROM image and the MAC address (the chip restarts with them); whether the flash is written back to its file when the emulator stops; saving the display's image as PNG |
 
 Click RESET to restart the chip. BOOT is held as long as the mouse button is.
@@ -84,6 +84,9 @@ the ESP32-S3 2nd-stage bootloader (`assets/esp32s3-bootloader.bin`, the one
 `espflash save-image --merge --flash-size 16mb` writes) and the partition table
 of the run's `firmware/partitions.csv` to make the flash.
 
+An ESP-Miner release brings a factory image per board (`esp-miner-factory-<board>-<tag>.bin`,
+with the board settings in NVS); it is downloaded the same way, without a token.
+
 ### Options
 
 Every option has an environment variable, and the window's menus change them
@@ -95,8 +98,8 @@ An option or its variable overrides the choice kept from the window.
 | `--board <number or family>` (`601`, `gamma`...; by default the number in the flash or ELF file name, `...bitaxe-601...`) | `BITAXE_EMU_BOARD` | board menu |
 | `--flash <image>` (bootloader, partition table and application, `espflash save-image --merge`) | `BITAXE_EMU_FLASH` | firmware menu, Flash image |
 | `--elf <file>` | `BITAXE_EMU_ELF` | firmware menu, ELF |
-| `--firmware esp-miner-rs\|esp-miner` (the newest CI build) | `BITAXE_EMU_FIRMWARE` | firmware menu, CI |
-| `--branch <name>` (`main` for esp-miner-rs, `master` for ESP-Miner) | `BITAXE_EMU_BRANCH` | firmware menu, branch |
+| `--firmware esp-miner-rs\|esp-miner\|esp-miner-release` (the newest CI build, or an ESP-Miner release) | `BITAXE_EMU_FIRMWARE` | firmware menu |
+| `--branch <name>` (`main` for esp-miner-rs, `master` for ESP-Miner; for a release, its tag, `latest` by default) | `BITAXE_EMU_BRANCH` | firmware menu, branch or version |
 | `--rom <file>` (by default the image of the build: `ESP32S3_ROM` at build time, which the Nix package sets, else `../upstream/qemu-espressif/pc-bios/esp32s3_rev0_rom.bin`) | `BITAXE_EMU_ROM` | Settings |
 | `--mac <address>` (default `7c:df:a1:0b:17:ae`) | `BITAXE_EMU_MAC` | Settings |
 | `--persist [true\|false]` (write the flash back to its file when the emulator stops, keeping the settings the firmware saved) | `BITAXE_EMU_PERSIST` | Settings |
@@ -115,7 +118,10 @@ BITAXE_EMU_FIRMWARE=esp-miner-rs BITAXE_EMU_BOARD=1300 bitaxe-emu
 Debugging aids, all optional: `BITAXE_EMU_SCRIPT="2.0:boot_down,4.6:boot_up,6:reset"`
 presses buttons at given times in headless runs, `BITAXE_EMU_MMIO_LOG=1` prints
 the last peripheral accesses, `BITAXE_EMU_PROFILE=1` samples the call chains,
-`ESP32S3_I2C_TRACE=1` traces the I2C command lists.
+`ESP32S3_I2C_TRACE=1` traces the I2C command lists,
+`BITAXE_EMU_DUMP="0x40370000:0x70000:iram.bin,..."` saves memory ranges at the
+end of a headless run, and `BITAXE_EMU_CONSOLE_DUMP=<prefix>` appends the raw
+UART0 and USB-Serial-JTAG output to `<prefix>.uart` and `<prefix>.usb`.
 
 ### Building
 
@@ -179,10 +185,12 @@ its hash in `nix/package.nix`.
   while it is busy, and the window shows the speed.
 - The power, thermal and fan figures come from a simple model, not from
   measurements of each board.
-- ESP-Miner images boot through the bootloader and stop at the start of the
-  application: ESP-Miner runs on both cores with the octal PSRAM, while the
-  emulator models one core and no PSRAM. It also reads its board from NVS
-  settings that the CI image does not hold.
+- ESP-Miner runs (both cores, the octal PSRAM, the display, the regulator, the
+  fans and the ASIC chain) from its release images; its CI image holds no board
+  settings. The emulated eFuses carry no ADC calibration, so ESP-Miner logs ADC
+  calibration errors (every 100 ms on the DAC boards, which read the core
+  voltage on the ADC); the TPS546 model does not answer MFR_ID, MFR_MODEL or
+  MFR_REVISION.
 
 ## Licenses
 

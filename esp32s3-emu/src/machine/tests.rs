@@ -10,6 +10,7 @@ use rax::isa::xtensa::XtensaBus;
 fn soc() -> Soc {
     let periph = Peripherals::new(PeripheralsConfig {
         flash: Vec::new(),
+        psram: 0,
         efuse: Efuse::new([0; efuse::WORDS]),
         strap: STRAP_SPI_BOOT,
     });

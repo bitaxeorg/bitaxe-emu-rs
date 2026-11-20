@@ -172,6 +172,8 @@ impl Board {
             rom,
             periph: PeripheralsConfig {
                 flash,
+                // The ESP32-S3 modules of the boards carry 8 MB of octal PSRAM.
+                psram: 8 << 20,
                 efuse: Efuse::with_mac(mac),
                 strap: STRAP_SPI_BOOT,
             },

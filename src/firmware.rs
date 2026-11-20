@@ -23,6 +23,7 @@ const IDF_REPO: &str = "bitaxeorg/ESP-Miner";
 const IDF_WORKFLOW: &str = "build.yml";
 const IDF_ARTIFACT: &str = "esp-miner-factory.bin";
 pub const IDF_BRANCH: &str = "master";
+pub const LATEST: &str = "latest";
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Source {
@@ -36,6 +37,9 @@ pub enum Source {
     EspMinerRs { branch: String },
     /// The ESP-Miner CI factory image.
     EspMiner { branch: String },
+    /// The factory image for the board of an ESP-Miner release (with its
+    /// board settings); `tag` "latest" for the newest one.
+    EspMinerRelease { tag: String },
 }
 
 /// A firmware ready to run.
@@ -58,6 +62,7 @@ impl Source {
             ),
             Source::EspMinerRs { branch } => format!("esp-miner-rs CI ({branch})"),
             Source::EspMiner { branch } => format!("ESP-Miner CI ({branch})"),
+            Source::EspMinerRelease { tag } => format!("ESP-Miner release ({tag})"),
         }
     }
 
@@ -113,6 +118,15 @@ impl Source {
                     flash,
                     elf: None,
                     label: format!("ESP-Miner {run}"),
+                    path: None,
+                })
+            }
+            Source::EspMinerRelease { tag } => {
+                let (tag, file) = fetch_release(IDF_REPO, tag, spec, log)?;
+                Ok(Image {
+                    flash: read(&file)?,
+                    elf: None,
+                    label: format!("ESP-Miner {tag}"),
                     path: None,
                 })
             }
@@ -201,6 +215,68 @@ fn fetch(
                 "Using the cached {artifact} of run {newest}: {description}"
             ));
             Ok((dir, description))
+        }
+    }
+}
+
+/// The factory image for `spec` of release `tag` ("latest" for the newest) of
+/// `repo`, downloaded into the cache unless it is there already, with the
+/// release tag. Without network, the cached release with the highest tag.
+fn fetch_release(
+    repo: &str,
+    tag: &str,
+    spec: &Spec,
+    log: &mut dyn FnMut(String),
+) -> Result<(String, PathBuf), String> {
+    let root = github::cache_dir()
+        .join(repo.replace('/', "-"))
+        .join("releases");
+    let gh = Github::new();
+    let tag = if tag.trim().is_empty() {
+        LATEST
+    } else {
+        tag.trim()
+    };
+    log(format!("Looking for the {repo} release {tag}"));
+    match gh.release(repo, tag) {
+        Ok((tag, assets)) => {
+            let name = format!("esp-miner-factory-{}-{tag}.bin", spec.number);
+            let file = root.join(&tag).join(&name);
+            if !file.is_file() {
+                let (_, url) = assets.iter().find(|(n, _)| *n == name).ok_or_else(|| {
+                    format!(
+                        "release {tag} has no factory image for board {}",
+                        spec.number
+                    )
+                })?;
+                log(format!("Downloading {name}"));
+                let bytes = gh.download(url)?;
+                std::fs::create_dir_all(root.join(&tag)).map_err(|e| e.to_string())?;
+                // Written under another name first, so a cut download is not taken
+                // for a whole one.
+                let part = file.with_extension("part");
+                std::fs::write(&part, bytes).map_err(|e| e.to_string())?;
+                std::fs::rename(&part, &file).map_err(|e| e.to_string())?;
+            }
+            Ok((tag, file))
+        }
+        Err(e) => {
+            log(format!("WARN {e}"));
+            let suffix = format!("esp-miner-factory-{}-", spec.number);
+            let mut cached: Vec<(String, PathBuf)> = std::fs::read_dir(&root)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|d| {
+                    let tag = d.file_name().to_str()?.to_string();
+                    let file = d.path().join(format!("{suffix}{tag}.bin"));
+                    file.is_file().then_some((tag, file))
+                })
+                .collect();
+            cached.sort();
+            let (tag, file) = cached.pop().ok_or(e)?;
+            log(format!("Using the cached release {tag}"));
+            Ok((tag, file))
         }
     }
 }
@@ -398,6 +474,9 @@ impl Choice {
             "esp-miner" => Source::EspMiner {
                 branch: branch.unwrap_or_else(|| IDF_BRANCH.into()),
             },
+            "esp-miner-release" => Source::EspMinerRelease {
+                tag: get("tag").unwrap_or_else(|| LATEST.into()),
+            },
             "file" => Source::File {
                 flash: get("flash")?.into(),
                 elf: get("elf").filter(|e| !e.is_empty()).map(PathBuf::from),
@@ -425,6 +504,9 @@ impl Choice {
                 text += &format!("source=esp-miner-rs\nbranch={branch}\n");
             }
             Source::EspMiner { branch } => text += &format!("source=esp-miner\nbranch={branch}\n"),
+            Source::EspMinerRelease { tag } => {
+                text += &format!("source=esp-miner-release\ntag={tag}\n");
+            }
             Source::File { flash, elf } => {
                 text += &format!("source=file\nflash={}\n", flash.display());
                 if let Some(elf) = elf {

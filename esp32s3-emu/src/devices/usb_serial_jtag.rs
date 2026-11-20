@@ -1,5 +1,7 @@
 //! USB-Serial-JTAG (0x6003_8000), serial side: bytes written to EP1 reach the
 //! host (as if a terminal were connected), bytes from the host can be read.
+//! The host sends a start-of-frame packet every millisecond, so SOF_INT_RAW is
+//! set again as soon as it is cleared.
 
 use std::collections::VecDeque;
 
@@ -13,6 +15,7 @@ const DATE: u32 = 0x80;
 
 const CONF_IN_EP_DATA_FREE: u32 = 1 << 1;
 const CONF_OUT_EP_DATA_AVAIL: u32 = 1 << 2;
+const INT_SOF: u32 = 1 << 1;
 const INT_SERIAL_OUT_RECV_PKT: u32 = 1 << 2;
 const INT_SERIAL_IN_EMPTY: u32 = 1 << 3;
 
@@ -32,7 +35,7 @@ impl UsbSerialJtag {
         self.regs = vec![0; 0x21];
         self.pending.clear();
         self.int_ena = 0;
-        self.int_raw = INT_SERIAL_IN_EMPTY;
+        self.int_raw = INT_SERIAL_IN_EMPTY | INT_SOF;
     }
 
     /// The host sends bytes to the chip.
@@ -82,7 +85,7 @@ impl UsbSerialJtag {
             INT_ENA => self.int_ena = v,
             INT_CLR => {
                 self.int_raw &= !v;
-                self.int_raw |= INT_SERIAL_IN_EMPTY;
+                self.int_raw |= INT_SERIAL_IN_EMPTY | INT_SOF;
                 if !self.rx.is_empty() {
                     self.int_raw |= INT_SERIAL_OUT_RECV_PKT;
                 }

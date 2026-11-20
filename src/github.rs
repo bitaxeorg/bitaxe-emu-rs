@@ -136,6 +136,42 @@ impl Github {
         )
     }
 
+    /// The tag of release `tag` of `repo` (the newest one for "latest"), with
+    /// the name and download address of each of its files.
+    pub fn release(
+        &self,
+        repo: &str,
+        tag: &str,
+    ) -> Result<(String, Vec<(String, String)>), String> {
+        let path = if tag == "latest" {
+            format!("/repos/{repo}/releases/latest")
+        } else {
+            format!("/repos/{repo}/releases/tags/{tag}")
+        };
+        let release = self.json(&path)?;
+        let tag = release["tag_name"]
+            .as_str()
+            .ok_or_else(|| format!("{repo}: no release {tag}"))?
+            .to_string();
+        let assets = release["assets"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|a| {
+                Some((
+                    a["name"].as_str()?.to_string(),
+                    a["browser_download_url"].as_str()?.to_string(),
+                ))
+            })
+            .collect();
+        Ok((tag, assets))
+    }
+
+    /// A file at `url` (a release file, which needs no token).
+    pub fn download(&self, url: &str) -> Result<Vec<u8>, String> {
+        self.get(url, "application/octet-stream")
+    }
+
     /// A file of the repository at commit `sha`.
     pub fn file(&self, repo: &str, sha: &str, path: &str) -> Result<Vec<u8>, String> {
         self.get(
