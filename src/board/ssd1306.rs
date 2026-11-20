@@ -94,10 +94,6 @@ impl Ssd1306 {
                 *px = u8::from(lit != self.invert);
             }
         }
-        // The panel of the 0.91" modules is mounted rotated by 180° (its SEG0 and
-        // COM0 on the far side), so that segment remap and reversed COM scan give
-        // the upright image.
-        out.reverse();
         out
     }
 
