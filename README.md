@@ -187,8 +187,8 @@ its hash in `nix/package.nix`.
 - The interpreter runs at about 60 MIPS for both cores together (some 180 host
   instructions per emulated one): a busy firmware runs below real time, an
   idle one faster (the time a core spends in WAITI is skipped). After boot,
-  ESP-Miner runs at about 1.4× real time; esp-miner-rs at about 0.25×, as its
-  executor never lets the core idle. The window shows the speed.
+  ESP-Miner runs at about 1.4× real time and esp-miner-rs at about 30×. The
+  window shows the speed.
 - The power, thermal and fan figures come from a simple model, not from
   measurements of each board.
 - ESP-Miner runs (both cores, the octal PSRAM, the display, the regulator, the
