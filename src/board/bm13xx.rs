@@ -7,6 +7,10 @@
 //! [`Chain::update`], which is far below what a real chip hashes: at the usual
 //! ticket difficulties a nonce is rare. Jobs made of midstates (BM1397) are
 //! counted but not hashed.
+//!
+//! While a chip has work, its hash counters (one per domain and their total)
+//! advance at the rate of its PLL frequency and small cores, one count per 2^32
+//! hashes, as a healthy chip's do.
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -15,7 +19,13 @@ use sha2::{Digest, Sha256};
 const CHIP_ID: u8 = 0x00;
 const PLL0_PARAMETER: u8 = 0x08;
 const TICKET_MASK: u8 = 0x14;
+/// Hash counter of each domain, in domain order.
+const DOMAIN_COUNTERS: [u8; 8] = [0x88, 0x89, 0x8a, 0x8b, 0xac, 0xad, 0xae, 0xaf];
+/// Sum of the domain counters.
+const TOTAL_COUNTER: u8 = 0x8c;
 const VERSION_ROLLING: u8 = 0xa4;
+/// Hashes per count of the hash counters.
+const HASHES_PER_COUNT: f64 = 4_294_967_296.0;
 
 const CMD_JOB: u8 = 0x21;
 const CMD_SET_ADDR: u8 = 0x00;
@@ -79,6 +89,26 @@ impl Asic {
     /// Jobs carry midstates instead of the block header.
     fn midstate_jobs(self) -> bool {
         self == Asic::Bm1397
+    }
+
+    /// Hashes per clock cycle.
+    fn small_cores(self) -> f64 {
+        match self {
+            Asic::Bm1397 => 672.0,
+            Asic::Bm1366 => 894.0,
+            Asic::Bm1368 => 1276.0,
+            Asic::Bm1370 => 2040.0,
+            Asic::Bm1373 => 6900.0,
+        }
+    }
+
+    /// Hash domains, each with its counter (the BM1397 has none).
+    fn domains(self) -> usize {
+        match self {
+            Asic::Bm1397 => 0,
+            Asic::Bm1373 => 8,
+            _ => 4,
+        }
     }
 
     pub fn power_point(self) -> PowerPoint {
@@ -153,6 +183,20 @@ struct Chip {
     /// The chip took an address since the chain went inactive.
     addressed: bool,
     regs: BTreeMap<u8, u32>,
+    /// Fraction of a count of each domain counter not added yet.
+    count_frac: f64,
+}
+
+impl Chip {
+    /// Hash frequency in MHz (25 MHz reference and PLL0).
+    fn frequency_mhz(&self) -> f64 {
+        let v = self.regs.get(&PLL0_PARAMETER).copied().unwrap_or(0);
+        let fbdiv = f64::from((v >> 16) & 0xfff);
+        let refdiv = f64::from((v >> 8) & 0x3f).max(1.0);
+        let post1 = f64::from(((v >> 4) & 7) + 1);
+        let post2 = f64::from((v & 7) + 1);
+        25.0 * fbdiv / (refdiv * post1 * post2)
+    }
 }
 
 pub struct Chain {
@@ -170,6 +214,8 @@ pub struct Chain {
     pub hashes: u64,
     pub nonces_found: u64,
     pub jobs_received: u64,
+    /// Time of the last [`Chain::update`], s.
+    last_update: Option<f64>,
 }
 
 impl Chain {
@@ -186,6 +232,7 @@ impl Chain {
             hashes: 0,
             nonces_found: 0,
             jobs_received: 0,
+            last_update: None,
         };
         chain.chips = (0..count).map(|_| chain.reset_chip()).collect();
         chain
@@ -203,6 +250,7 @@ impl Chain {
             addr: 0,
             addressed: false,
             regs,
+            count_frac: 0.0,
         }
     }
 
@@ -220,15 +268,7 @@ impl Chain {
 
     /// Hash frequency of the first chip, in MHz (25 MHz reference and PLL0).
     pub fn frequency_mhz(&self) -> f32 {
-        let Some(chip) = self.chips.first() else {
-            return 0.0;
-        };
-        let v = chip.regs.get(&PLL0_PARAMETER).copied().unwrap_or(0);
-        let fbdiv = ((v >> 16) & 0xfff) as f32;
-        let refdiv = ((v >> 8) & 0x3f).max(1) as f32;
-        let post1 = (((v >> 4) & 7) + 1) as f32;
-        let post2 = ((v & 7) + 1) as f32;
-        25.0 * fbdiv / (refdiv * post1 * post2)
+        self.chips.first().map_or(0.0, |c| c.frequency_mhz() as f32)
     }
 
     /// Responses carry the version bits (11 bytes) once version rolling is on.
@@ -383,11 +423,15 @@ impl Chain {
         self.jobs_received += 1;
     }
 
-    /// Searches nonces of the current job within the hash budget.
-    pub fn update(&mut self) {
+    /// Advances the hash counters to `now` (seconds) and searches nonces of the
+    /// current job within the hash budget.
+    pub fn update(&mut self, now: f64) {
+        let dt = self.last_update.map_or(0.0, |t| (now - t).max(0.0));
+        self.last_update = Some(now);
         if !self.hashing() {
             return;
         }
+        self.count(dt);
         let Some(id) = self.current_job else { return };
         let mask = self.chips[0].regs.get(&TICKET_MASK).copied().unwrap_or(0);
         // The ticket mask holds the difficulty - 1, bytes bit-reversed.
@@ -426,6 +470,30 @@ impl Chain {
             seal(&mut r);
             self.tx.extend(r);
             self.nonces_found += 1;
+        }
+    }
+
+    /// Adds `dt` seconds of hashing to the counters of every chip.
+    fn count(&mut self, dt: f64) {
+        let domains = self.asic.domains();
+        if domains == 0 {
+            return;
+        }
+        let per_mhz = self.asic.small_cores() * 1e6 / domains as f64 / HASHES_PER_COUNT;
+        for chip in &mut self.chips {
+            chip.count_frac += chip.frequency_mhz() * per_mhz * dt;
+            let whole = chip.count_frac.floor();
+            chip.count_frac -= whole;
+            let n = whole as u32;
+            if n == 0 {
+                continue;
+            }
+            for reg in &DOMAIN_COUNTERS[..domains] {
+                let v = chip.regs.entry(*reg).or_insert(0);
+                *v = v.wrapping_add(n);
+            }
+            let total = chip.regs.entry(TOTAL_COUNTER).or_insert(0);
+            *total = total.wrapping_add(n.wrapping_mul(domains as u32));
         }
     }
 }
@@ -486,5 +554,42 @@ mod tests {
         let r: Vec<u8> = chain.tx.drain(..).collect();
         let values: Vec<u8> = r.chunks(9).map(|f| f[5]).collect();
         assert_eq!(values, [0, 0, 0xff, 0, 0, 0]);
+    }
+
+    fn read(chain: &mut Chain, reg: u8) -> u32 {
+        chain.tx.clear();
+        chain.receive(&command(0x52, 0, reg, None));
+        let r: Vec<u8> = chain.tx.drain(..).collect();
+        u32::from_be_bytes(r[2..6].try_into().unwrap())
+    }
+
+    #[test]
+    fn hash_counters_follow_the_frequency_while_hashing() {
+        let mut chain = Chain::new(Asic::Bm1370, 1);
+        chain.set_reset(false);
+        // 525 MHz: FBDIV 168, REFDIV 2, POSTDIV1 4, POSTDIV2 1.
+        chain.receive(&command(0x51, 0, PLL0_PARAMETER, Some(0x40a8_0230)));
+        chain.update(0.0);
+        chain.update(10.0);
+        assert_eq!(read(&mut chain, 0x88), 0, "no work, no hashing");
+        chain.jobs.insert(
+            0,
+            Job {
+                header: [0; 80],
+                next_nonce: 0,
+            },
+        );
+        chain.current_job = Some(0);
+        chain.update(20.0);
+        // 525e6 × 2040 / 4 / 2^32 per second, for 10 s.
+        let per_domain = 623;
+        for reg in [0x88, 0x89, 0x8a, 0x8b] {
+            assert_eq!(read(&mut chain, reg), per_domain);
+        }
+        assert_eq!(read(&mut chain, 0x8c), 4 * per_domain);
+        assert_eq!(read(&mut chain, 0xac), 0, "four domains only");
+        // A write clears a counter.
+        chain.receive(&command(0x51, 0, 0x88, Some(0)));
+        assert_eq!(read(&mut chain, 0x88), 0);
     }
 }

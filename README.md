@@ -50,7 +50,7 @@ The models:
 | TPS546D24A (PMBus 0x24) | commands read back; IC_DEVICE_ID; VIN, VOUT, IOUT and temperature telemetry; output on/off |
 | TPS40305 + DS4432 (0x48) + INA260 (0x40) | the output voltage from the DAC current into the feedback divider, PWR_EN on GPIO10; input voltage, current and power; the output voltage on ADC1 (GPIO2) |
 | EMC2101 (0x4C), EMC2103 (0x2E), EMC2302 (0x2F), TMP1075 (0x4A, 0x4B) | register files; internal, diode and board temperatures; fan tachometers from the fan drives |
-| BM13xx chain on UART1, NRST on GPIO1 | CHIP_ID enumeration, address assignment along the chain, registers, PLL frequency, version-rolling response format, jobs; nonces searched on the host within a small hash budget |
+| BM13xx chain on UART1, NRST on GPIO1 | CHIP_ID enumeration, address assignment along the chain, registers, PLL frequency, version-rolling response format, jobs; nonces searched on the host within a small hash budget; hash counters (each domain, total) at the rate of the PLL frequency and small cores while the chips have work |
 | Power and heat | chip power from voltage (per domain), frequency and activity; heatsinks with a fan-dependent thermal resistance; regulator and board temperatures; input power |
 | BOOT and RESET buttons | GPIO0 and chip enable, clickable on the board picture |
 
@@ -180,7 +180,10 @@ its hash in `nix/package.nix`.
   the firmware starts its access point, but no packet goes in or out. Without a
   network there is no pool and no job, so the chips stay idle.
 - Hashing on the host is far slower than the chips: at the usual ticket
-  difficulties a nonce is rare.
+  difficulties a nonce is rare. The chips' hash counters run at full rate, so
+  ESP-Miner, which reads its hashrate from them, sees the expected figure, but
+  its self-test also counts nonces and fails its total hashrate check (hold
+  BOOT for 2 s to skip the self-test).
 - The interpreter runs at about 60 MIPS for both cores together (some 180 host
   instructions per emulated one): a busy firmware runs below real time, an
   idle one faster (the time a core spends in WAITI is skipped). After boot,

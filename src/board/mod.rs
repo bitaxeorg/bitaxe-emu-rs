@@ -331,7 +331,7 @@ impl Board {
         let uart = &mut self.machine.periph().uart[ASIC_UART];
         let to_chain: Vec<u8> = uart.tx_out.drain(..).collect();
         self.chain.receive(&to_chain);
-        self.chain.update();
+        self.chain.update(now as f64 / TICK_HZ as f64);
         if !self.chain.tx.is_empty() {
             let bytes: Vec<u8> = self.chain.tx.drain(..).collect();
             self.machine.periph().uart[ASIC_UART].receive(&bytes, now);
