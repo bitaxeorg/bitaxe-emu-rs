@@ -1,0 +1,16 @@
+[package]
+name = "esp32s3-emu"
+version = "0.1.0"
+edition = "2024"
+description = "ESP32-S3 SoC emulator: rax's Xtensa LX7 core with the memory map, the boot from the internal ROM and the peripherals"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "esp32s3-run"
+path = "src/bin/esp32s3-run.rs"
+
+[dependencies]
+rax = { path = "../../upstream/rax", default-features = false }
+clap = { version = "4.6", features = ["derive"] }
+goblin = "0.10"
+sha2 = { version = "0.10", features = ["compress"] }

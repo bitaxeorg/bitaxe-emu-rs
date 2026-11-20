@@ -1,0 +1,32 @@
+[package]
+name = "bitaxe-emu-rs"
+version = "0.1.0"
+edition = "2024"
+description = "Bitaxe emulator: the ESP32-S3 of the board (esp32s3-emu, on rax's Xtensa LX7 core) runs the firmware, with the board around it"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "bitaxe-emu"
+path = "src/main.rs"
+
+[dependencies]
+esp32s3-emu = { path = "esp32s3-emu" }
+blit = { git = "https://github.com/nicoburniske/blit", rev = "cf322c08a43892ea813deb8c8cadd86a43d5f2c0" }
+blit-desktop = { git = "https://github.com/nicoburniske/blit", rev = "cf322c08a43892ea813deb8c8cadd86a43d5f2c0", default-features = false, features = ["cpu"] }
+blit-cpu = { git = "https://github.com/nicoburniske/blit", rev = "cf322c08a43892ea813deb8c8cadd86a43d5f2c0" }
+blit-gui = { git = "https://github.com/nicoburniske/blit", rev = "cf322c08a43892ea813deb8c8cadd86a43d5f2c0" }
+blit-gui-widgets = { git = "https://github.com/nicoburniske/blit", rev = "cf322c08a43892ea813deb8c8cadd86a43d5f2c0" }
+blit-text = { git = "https://github.com/nicoburniske/blit", rev = "cf322c08a43892ea813deb8c8cadd86a43d5f2c0" }
+blit-text-parley = { git = "https://github.com/nicoburniske/blit", rev = "cf322c08a43892ea813deb8c8cadd86a43d5f2c0" }
+clap = { version = "4.6", features = ["derive"] }
+defmt-decoder = "1.2"
+goblin = "0.10"
+png = "0.18"
+sha2 = "0.10"
+
+[workspace]
+members = ["esp32s3-emu"]
+
+[profile.release]
+lto = "fat"
+codegen-units = 1

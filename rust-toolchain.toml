@@ -1,0 +1,4 @@
+# BLIT needs nightly Rust (`#![feature(must_not_suspend)]` in blit-executor).
+[toolchain]
+channel = "nightly-2026-11-19"
+components = ["rustc", "cargo", "clippy", "rustfmt", "rust-analyzer", "rust-src"]

@@ -1,0 +1,103 @@
+{
+  lib,
+  makeRustPlatform,
+  rust-bin,
+  fetchurl,
+  pkg-config,
+  removeReferencesTo,
+  zstd,
+  dejavu_fonts,
+  wayland,
+  libxkbcommon,
+  fontconfig,
+  vulkan-loader,
+  # rax source tree, for the Xtensa LX7 core.
+  rax,
+}:
+
+let
+  # The toolchain of rust-toolchain.toml, without the development components.
+  rust = rust-bin.fromRustupToolchain {
+    inherit ((lib.importTOML ../rust-toolchain.toml).toolchain) channel;
+    profile = "minimal";
+  };
+  rustPlatform = makeRustPlatform {
+    cargo = rust;
+    rustc = rust;
+  };
+  # ESP32-S3 internal ROM image, the default of `--rom`.
+  rom = fetchurl {
+    url = "https://raw.githubusercontent.com/espressif/qemu/esp-develop-9.2.2-20261109/pc-bios/esp32s3_rev0_rom.bin";
+    hash = "sha256-tccJDMIu/OUcEyPO8xypb81nOlsdGxAX4hnTk/JlmRM=";
+  };
+  # Libraries the BLIT desktop backend opens at run time.
+  runtimeLibs = [
+    wayland
+    libxkbcommon
+    fontconfig
+    vulkan-loader
+  ];
+  fonts = "${dejavu_fonts}/share/fonts/truetype";
+in
+rustPlatform.buildRustPackage {
+  pname = "bitaxe-emu";
+  inherit ((lib.importTOML ../Cargo.toml).package) version;
+
+  src = lib.fileset.toSource {
+    root = ../.;
+    fileset = lib.fileset.unions [
+      ../Cargo.toml
+      ../Cargo.lock
+      ../src
+      ../esp32s3-emu
+      (lib.fileset.fileFilter (file: file.hasExt "png") ../assets)
+    ];
+  };
+
+  cargoLock = {
+    lockFile = ../Cargo.lock;
+    outputHashes = {
+      "blit-0.1.0" = "sha256-YSoaLiCByY9OxwOUZxRTAi1wed6yieWCXJ04h00BxAg=";
+    };
+  };
+
+  postPatch = ''
+    substituteInPlace esp32s3-emu/Cargo.toml \
+      --replace-fail '"../../upstream/rax"' '"${rax}"'
+  '';
+
+  nativeBuildInputs = [
+    pkg-config
+    removeReferencesTo
+  ];
+  buildInputs = [ zstd ];
+
+  # Both binaries: bitaxe-emu and esp32s3-run.
+  cargoBuildFlags = [ "--workspace" ];
+  cargoTestFlags = [ "--workspace" ];
+
+  env = {
+    BITAXE_EMU_FONT = "${fonts}/DejaVuSans.ttf";
+    BITAXE_EMU_FONT_MONO = "${fonts}/DejaVuSansMono.ttf";
+    ESP32S3_ROM = "${rom}";
+  };
+
+  # The rax source paths left in panic messages are not a run-time dependency.
+  # The RPATH is extended after the fixup, which drops the entries no DT_NEEDED
+  # uses.
+  postFixup = ''
+    remove-references-to -t ${rax} $out/bin/*
+    patchelf --add-rpath ${lib.makeLibraryPath runtimeLibs} $out/bin/bitaxe-emu
+  '';
+
+  meta = {
+    description = "Bitaxe emulator: the ESP32-S3 runs the miner firmware with the board around it";
+    homepage = "https://github.com/bitaxeorg/bitaxe-emu-rs";
+    license = with lib.licenses; [
+      mit
+      asl20
+    ];
+    mainProgram = "bitaxe-emu";
+    platforms = lib.platforms.linux;
+  };
+}
