@@ -200,7 +200,20 @@ impl Esp32s3 {
             let lines = self.soc.irq_lines();
             cpu.set_irq_lines(lines);
             let before = cpu.icount;
-            let exit = cpu.run(&mut self.soc, budget - done);
+            let exit = if self.soc.mmio_log.is_some() {
+                // one instruction at a time, its PC known to the peripheral access log
+                let mut exit = Exit::Budget;
+                while cpu.icount - before < budget - done {
+                    self.soc.trace_pc = cpu.pc;
+                    exit = cpu.run(&mut self.soc, 1);
+                    if !matches!(exit, Exit::Budget) {
+                        break;
+                    }
+                }
+                exit
+            } else {
+                cpu.run(&mut self.soc, budget - done)
+            };
             self.soc.end_slice(cpu.icount);
             done += cpu.icount - before;
             match exit {

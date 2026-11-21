@@ -47,8 +47,11 @@ pub struct Soc {
     pub core: usize,
     /// Unmodelled peripheral registers: address → (reads, writes).
     pub unmodelled: BTreeMap<u32, (u64, u64)>,
-    /// When set, every peripheral access: (address, value, write), oldest first.
-    pub mmio_log: Option<std::collections::VecDeque<(u32, u32, bool)>>,
+    /// When set, every peripheral access: (address, value, write, PC), oldest first. The cores
+    /// then run one instruction at a time to know the PC.
+    pub mmio_log: Option<std::collections::VecDeque<(u32, u32, bool, u32)>>,
+    /// PC of the instruction running, while [`Soc::mmio_log`] is set.
+    pub trace_pc: u32,
     /// Entries kept in [`Soc::mmio_log`].
     pub mmio_log_cap: usize,
     /// Instruction count at the start of the current slice, and its time.
@@ -91,6 +94,7 @@ impl Soc {
             core: 0,
             unmodelled: BTreeMap::new(),
             mmio_log: None,
+            trace_pc: 0,
             mmio_log_cap: 4096,
             slice_icount: 0,
             slice_ticks: 0,
@@ -298,13 +302,14 @@ impl Soc {
     fn log_mmio(&mut self, addr: u32, value: u32, write: bool) {
         if let Some(log) = self.mmio_log.as_mut() {
             // Polling loops repeat the same access: keep one.
-            if log.back() == Some(&(addr, value, write)) {
+            let entry = (addr, value, write, self.trace_pc);
+            if log.back() == Some(&entry) {
                 return;
             }
             if log.len() >= self.mmio_log_cap {
                 log.pop_front();
             }
-            log.push_back((addr, value, write));
+            log.push_back(entry);
         }
     }
 

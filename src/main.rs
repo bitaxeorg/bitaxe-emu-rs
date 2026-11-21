@@ -270,11 +270,14 @@ fn main() {
     }
     if let Some(log) = emulator.board.machine.soc.mmio_log.as_ref() {
         let mut last = None;
-        for &(a, v, w) in log.iter() {
-            if last != Some((a, v, w)) {
-                eprintln!("mmio {} {a:#010x} {v:#010x}", if w { "W" } else { "R" });
+        for &(a, v, w, pc) in log.iter() {
+            if last != Some((a, v, w, pc)) {
+                eprintln!(
+                    "mmio {} {a:#010x} {v:#010x} pc {pc:#010x}",
+                    if w { "W" } else { "R" }
+                );
             }
-            last = Some((a, v, w));
+            last = Some((a, v, w, pc));
         }
     }
 }
