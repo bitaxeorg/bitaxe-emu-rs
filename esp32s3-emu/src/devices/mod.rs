@@ -24,6 +24,7 @@ pub mod systimer;
 pub mod timg;
 pub mod uart;
 pub mod usb_serial_jtag;
+pub mod wifi_mac;
 
 use cache::Cache;
 use efuse::Efuse;
@@ -43,6 +44,7 @@ use systimer::Systimer;
 use timg::Timg;
 use uart::Uart;
 use usb_serial_jtag::UsbSerialJtag;
+use wifi_mac::WifiMac;
 
 /// Ticks per second.
 pub const TICK_HZ: u64 = 2_400_000_000;
@@ -52,6 +54,7 @@ pub const STRAP_SPI_BOOT: u32 = 0x4;
 
 /// Interrupt matrix source numbers.
 pub mod source {
+    pub const WIFI_MAC: usize = 0;
     pub const GPIO: usize = 16;
     pub const LCD_CAM: usize = 24;
     pub const UART0: usize = 27;
@@ -67,6 +70,12 @@ pub mod source {
     pub const FROM_CPU_INTR0: usize = 79;
     pub const USB_SERIAL_JTAG: usize = 96;
 }
+
+/// Wi-Fi MAC registers (12 KB).
+pub const WIFI_MAC_BASE: u32 = 0x6003_3000;
+/// APB_CTRL WIFI_RST_EN, and its Wi-Fi MAC reset bit.
+const APB_CTRL_WIFI_RST_EN: u32 = 0x018;
+const WIFI_RST_MAC: u32 = 1 << 2;
 
 /// GDMA registers (4 KB).
 pub const GDMA_BASE: u32 = 0x6003_f000;
@@ -103,6 +112,7 @@ pub struct Peripherals {
     pub sens: Sens,
     pub gdma: Gdma,
     pub lcd_cam: LcdCam,
+    pub wifi: WifiMac,
     /// Peripherals whose registers only read back what was written.
     regfiles: Vec<(u32, RegFile)>,
     rng: u64,
@@ -119,7 +129,6 @@ const REGFILES: &[(u32, u32, &str)] = &[
     (0x6000_5000, 0x2000, "rf_frontend"),
     (0x6000_e000, 0x1000, "regi2c"),
     (0x6001_c000, 0x2000, "baseband"),
-    (0x6003_3000, 0x2000, "wifi_mac"),
     (0x6001_6000, 0x1000, "rmt"),
     (0x6001_9000, 0x1000, "ledc"),
     (0x6002_6000, 0x1000, "apb_ctrl"),
@@ -140,11 +149,7 @@ impl Peripherals {
                     // The analog side (SAR ADCs, RTC IO, sensors) is not modelled.
                     rf = rf.write_only();
                 }
-                if name == "regi2c"
-                    || name == "rf_frontend"
-                    || name == "baseband"
-                    || name == "wifi_mac"
-                {
+                if name == "regi2c" || name == "rf_frontend" || name == "baseband" {
                     // The analog and radio hardware behind these is not modelled:
                     // their status bits toggle, so that calibration polls finish.
                     rf = rf.toggling();
@@ -171,6 +176,7 @@ impl Peripherals {
             sens: Sens::new(),
             gdma: Gdma::new(),
             lcd_cam: LcdCam::new(),
+            wifi: WifiMac::new(),
             regfiles,
             rng: 0x2545_f491_4f6c_dd1d,
             irq_dirty: true,
@@ -202,6 +208,7 @@ impl Peripherals {
         self.sens.reset();
         self.gdma.reset();
         self.lcd_cam.reset();
+        self.wifi.reset();
         for (_, rf) in &mut self.regfiles {
             rf.reset();
         }
@@ -226,6 +233,7 @@ impl Peripherals {
     /// Levels of the interrupt sources.
     pub fn source_levels(&self) -> [bool; SOURCES] {
         let mut l = [false; SOURCES];
+        l[source::WIFI_MAC] = self.wifi.irq();
         l[source::GPIO] = self.gpio.irq();
         l[source::LCD_CAM] = self.lcd_cam.irq();
         for (i, u) in self.uart.iter().enumerate() {
@@ -264,6 +272,7 @@ impl Peripherals {
             .chain(i)
             .chain(self.systimer.next_event())
             .chain(self.lcd_cam.next_event())
+            .chain(self.wifi.next_event())
             .min()
     }
 
@@ -275,6 +284,7 @@ impl Peripherals {
             changed |= t.update(now);
         }
         changed |= self.systimer.update(now);
+        changed |= self.wifi.update(now);
         for u in &mut self.uart {
             u.apb_hz = apb;
             changed |= u.update(now);
@@ -339,6 +349,7 @@ impl Peripherals {
                 self.rng ^= self.rng >> 27;
                 (self.rng.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 32) as u32
             }
+            0x6_0033..=0x6_0035 => self.wifi.read(addr - WIFI_MAC_BASE, now),
             0x6_0038 => self.usb_serial_jtag.read(off),
             0x6_003b => self.sha.read(off),
             0x6_003f => self.gdma.read(off),
@@ -381,6 +392,16 @@ impl Peripherals {
             0x6_0020 => self.timg[1].write(off, v, now),
             0x6_0023 => self.systimer.write(off, v, now),
             0x6_0035 if off == 0x07c => false,
+            0x6_0033..=0x6_0035 => self.wifi.write(addr - WIFI_MAC_BASE, v, now),
+            0x6_0026 if off == APB_CTRL_WIFI_RST_EN => {
+                if v & WIFI_RST_MAC != 0 {
+                    self.wifi.reset();
+                }
+                if let Some((o, rf)) = self.regfile(addr) {
+                    rf.write(o, v);
+                }
+                true
+            }
             0x6_0038 => self.usb_serial_jtag.write(off, v),
             0x6_003b => {
                 self.sha.write(off, v);

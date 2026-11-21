@@ -7,6 +7,7 @@
 
 pub mod devices;
 pub mod machine;
+pub mod net;
 
 /// Internal ROM image used when none is given: the path in `ESP32S3_ROM` at
 /// build time, else the path below, relative to this crate.

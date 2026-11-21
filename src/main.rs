@@ -74,6 +74,19 @@ struct Args {
     /// the window's Save button.
     #[arg(long, env = "BITAXE_EMU_DISPLAY_PNG", alias = "oled-png")]
     display_png: Option<PathBuf>,
+    /// SSID of the open Wi-Fi access point the emulator offers to the chip.
+    #[arg(long, env = "BITAXE_EMU_WIFI_SSID", default_value = "bitaxe-emu")]
+    wifi_ssid: String,
+    /// Host port (on 127.0.0.1) forwarded to the chip's web server, through the
+    /// emulated access point or the chip's own; 0 for none.
+    #[arg(long, env = "BITAXE_EMU_HTTP_PORT", default_value_t = 8080)]
+    http_port: u16,
+    /// No Wi-Fi network around the chip.
+    #[arg(long, env = "BITAXE_EMU_NO_WIFI")]
+    no_wifi: bool,
+    /// Log every Wi-Fi frame.
+    #[arg(long, env = "BITAXE_EMU_WIFI_TRACE")]
+    wifi_trace: bool,
     /// Decode the RTT up-buffer 0 of a dump of the data RAM (from 0x3fc88000) and exit.
     #[arg(long, env = "BITAXE_EMU_DECODE_RTT", hide = true)]
     decode_rtt: Option<PathBuf>,
@@ -85,6 +98,16 @@ fn main() {
         decode_rtt_dump(&std::fs::read(dump).unwrap(), &std::fs::read(elf).unwrap());
         return;
     }
+    let _ = emu::NETWORK.set((!args.no_wifi).then(|| esp32s3_emu::net::NetworkConfig {
+        ssid: args.wifi_ssid.clone(),
+        trace: args.wifi_trace,
+        forwards: if args.http_port == 0 {
+            Vec::new()
+        } else {
+            vec![(args.http_port, 80)]
+        },
+        ..Default::default()
+    }));
     let saved = Choice::load().unwrap_or_else(Choice::default_choice);
     let source = match (&args.flash, args.firmware) {
         (Some(flash), _) => Source::File {
@@ -167,6 +190,28 @@ fn main() {
         board.flash_path = image.path;
     }
     let mut emulator = emu::Emulator::new(board, image.elf.as_deref());
+    if let Some(range) = std::env::var("BITAXE_EMU_WATCH").ok().and_then(|v| {
+        let (a, n) = v.split_once(':').unwrap_or((&v, "4"));
+        let a = u32::from_str_radix(a.trim_start_matches("0x"), 16).ok()?;
+        Some(a..a + n.parse::<u32>().ok()?)
+    }) {
+        emulator.board.machine.soc.watch = Some(range);
+    }
+    for pc in std::env::var("BITAXE_EMU_BREAK")
+        .unwrap_or_default()
+        .split(',')
+    {
+        if let Ok(pc) = u32::from_str_radix(pc.trim_start_matches("0x"), 16) {
+            emulator.board.machine.add_breakpoint(pc);
+        }
+    }
+    if let Some(range) = std::env::var("BITAXE_EMU_STACK_WATCH").ok().and_then(|v| {
+        let (lo, hi) = v.split_once(':')?;
+        let parse = |x: &str| u32::from_str_radix(x.trim_start_matches("0x"), 16).ok();
+        Some(parse(lo)?..parse(hi)?)
+    }) {
+        emulator.board.machine.soc.stack_watch = Some(range);
+    }
     if std::env::var_os("BITAXE_EMU_MMIO_LOG").is_some() {
         emulator.board.machine.soc.mmio_log = Some(Default::default());
         emulator.board.machine.soc.mmio_log_cap = 1 << 24;
@@ -207,6 +252,22 @@ fn main() {
         && let Err(e) = emulator.save_display_png(path)
     {
         eprintln!("{e}");
+    }
+    {
+        // the interrupt sources routed to PRO_CPU, and their levels
+        let periph = &mut emulator.board.machine.soc.periph;
+        let levels = periph.source_levels();
+        let mut routed = Vec::new();
+        for src in 0..esp32s3_emu::devices::intmatrix::SOURCES {
+            let line = periph.intmatrix.read((src * 4) as u32, &levels) & 0x1f;
+            if line != 6 {
+                routed.push(format!(
+                    "{src}>{line}{}",
+                    if levels[src] { "!" } else { "" }
+                ));
+            }
+        }
+        eprintln!("PRO_CPU sources: {}", routed.join(" "));
     }
     for (name, cpu) in [
         ("PRO_CPU", &emulator.board.machine.cpu),
@@ -267,6 +328,39 @@ fn main() {
             Ok(()) => eprintln!("dumped {len:#x} bytes at {addr:#010x} to {file}"),
             Err(e) => eprintln!("{file}: {e}"),
         }
+    }
+    if let Some((sp, chain)) = emulator.board.machine.soc.stack_low.as_ref() {
+        let chain: Vec<String> = chain
+            .iter()
+            .map(|(a, s)| format!("{a:#010x}@{s:#010x}"))
+            .collect();
+        eprintln!("stack low {sp:#010x}: {}", chain.join(" "));
+    }
+    for hit in &emulator.board.machine.break_log {
+        let regs: Vec<String> = hit.regs.iter().map(|r| format!("{r:#010x}")).collect();
+        let chain: Vec<String> = hit
+            .chain
+            .iter()
+            .map(|(a, s)| format!("{a:#010x}@{s:#010x}"))
+            .collect();
+        eprintln!(
+            "break core {} a2.. {} chain {}",
+            hit.core,
+            regs.join(" "),
+            chain.join(" ")
+        );
+    }
+    let soc = &emulator.board.machine.soc;
+    for (i, &(a, v, pc)) in soc.watch_log.iter().enumerate() {
+        let (sp, chain) = soc.watch_chains.get(i).cloned().unwrap_or_default();
+        let chain: Vec<String> = chain
+            .iter()
+            .map(|(a, s)| format!("{a:#010x}@{s:#010x}"))
+            .collect();
+        eprintln!(
+            "watch W {a:#010x} {v:#010x} pc {pc:#010x} sp {sp:#010x} chain {}",
+            chain.join(" ")
+        );
     }
     if let Some(log) = emulator.board.machine.soc.mmio_log.as_ref() {
         let mut last = None;

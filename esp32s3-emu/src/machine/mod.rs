@@ -69,6 +69,17 @@ pub struct Esp32s3 {
     pub max_slice: u64,
     /// Functions replaced by an immediate return: entry address → result.
     stubs: std::collections::BTreeMap<u32, u32>,
+    /// Addresses where the cores record their state in [`Esp32s3::break_log`].
+    breakpoints: std::collections::BTreeSet<u32>,
+    pub break_log: Vec<BreakHit>,
+}
+
+/// A core reached a breakpoint: its a2..a15 and call chain (PC and stack pointer).
+#[derive(Clone, Debug)]
+pub struct BreakHit {
+    pub core: usize,
+    pub regs: Vec<u32>,
+    pub chain: Vec<(u32, u32)>,
 }
 
 impl Esp32s3 {
@@ -95,6 +106,8 @@ impl Esp32s3 {
             report_causes,
             max_slice: 2000,
             stubs: std::collections::BTreeMap::new(),
+            breakpoints: std::collections::BTreeSet::new(),
+            break_log: Vec::new(),
         }
     }
 
@@ -102,6 +115,14 @@ impl Esp32s3 {
     /// firmware parts whose hardware is not emulated, such as the radio).
     pub fn stub_function(&mut self, addr: u32, value: u32) {
         self.stubs.insert(addr, value);
+        self.cpu.set_hook(addr);
+        self.app.set_hook(addr);
+    }
+
+    /// Records the state of the cores in [`Esp32s3::break_log`] each time they
+    /// reach `addr` (the first 16 times).
+    pub fn add_breakpoint(&mut self, addr: u32) {
+        self.breakpoints.insert(addr);
         self.cpu.set_hook(addr);
         self.app.set_hook(addr);
     }
@@ -169,6 +190,7 @@ impl Esp32s3 {
         }
         self.now = (start + budget * cycle).max(self.soc.time_floor());
         self.soc.periph.update(self.now);
+        self.soc.poll_wifi(self.now);
         if let Some(reset) = self.chip_reset() {
             return Some(reset);
         }
@@ -200,12 +222,39 @@ impl Esp32s3 {
             let lines = self.soc.irq_lines();
             cpu.set_irq_lines(lines);
             let before = cpu.icount;
-            let exit = if self.soc.mmio_log.is_some() {
+            let exit = if self.soc.mmio_log.is_some()
+                || self.soc.watch.is_some()
+                || self.soc.stack_watch.is_some()
+            {
                 // one instruction at a time, its PC known to the peripheral access log
                 let mut exit = Exit::Budget;
                 while cpu.icount - before < budget - done {
                     self.soc.trace_pc = cpu.pc;
+                    // ENTRY (op0 6, n 3) sets up the frame of a function
+                    let entry = self.soc.stack_watch.is_some()
+                        && self.soc.read_bytes(cpu.pc, 1).is_some_and(|b| b[0] == 0x36);
+                    let watched = self.soc.watch_log.len();
                     exit = cpu.run(&mut self.soc, 1);
+                    if entry
+                        && core == 0
+                        && let Some(range) = self.soc.stack_watch.clone()
+                    {
+                        // the deepest frame in `range`, with its call chain
+                        let (wb, ws) = (cpu.sr[72], cpu.sr[73]);
+                        let sp = cpu.ar[((wb * 4 + 1) % 64) as usize];
+                        if range.contains(&sp)
+                            && self.soc.stack_low.as_ref().is_none_or(|l| sp < l.0)
+                        {
+                            let chain = backtrace(cpu, &self.soc, wb, ws);
+                            self.soc.stack_low = Some((sp, chain));
+                        }
+                    }
+                    if self.soc.watch_log.len() > watched {
+                        let (wb, ws) = (cpu.sr[72], cpu.sr[73]);
+                        let sp = cpu.ar[((wb * 4 + 1) % 64) as usize];
+                        let chain = backtrace(cpu, &self.soc, wb, ws);
+                        self.soc.watch_chains.push((sp, chain));
+                    }
                     if !matches!(exit, Exit::Budget) {
                         break;
                     }
@@ -226,6 +275,12 @@ impl Esp32s3 {
                     match self.stubs.get(&cpu.pc) {
                         Some(&value) => cpu.return_from_function(value),
                         None => {
+                            if self.breakpoints.contains(&cpu.pc) && self.break_log.len() < 16 {
+                                let (wb, ws) = (cpu.sr[72], cpu.sr[73]);
+                                let regs = (2..16).map(|i| cpu.a(i)).collect();
+                                let chain = backtrace(cpu, &self.soc, wb, ws);
+                                self.break_log.push(BreakHit { core, regs, chain });
+                            }
                             let _ = cpu.step(&mut self.soc);
                         }
                     }
@@ -256,6 +311,7 @@ impl Esp32s3 {
             .next_event(self.now)
             .unwrap_or(u64::MAX)
             .min(self.now + self.cpu.cycles_to_ccompare() * cycle)
+            .min(self.soc.air_event().unwrap_or(u64::MAX))
             .min(deadline);
         if app {
             next = next.min(self.now + self.app.cycles_to_ccompare() * cycle);
@@ -268,6 +324,7 @@ impl Esp32s3 {
             }
             self.now += cycles * cycle;
             self.soc.periph.update(self.now);
+            self.soc.poll_wifi(self.now);
         }
     }
 
@@ -309,4 +366,43 @@ impl Esp32s3 {
         self.soc.write_u32(desc + 16, wr);
         out
     }
+}
+
+/// The call chain of `cpu`: the PC, then the return addresses of the frames in
+/// the register windows, then of the frames spilled to the stack (the caller's
+/// a0 and a1 are 16 and 12 bytes below each frame's stack pointer). Each with
+/// the stack pointer of its frame.
+fn backtrace(cpu: &XtensaCpu, soc: &Soc, wb: u32, ws: u32) -> Vec<(u32, u32)> {
+    let pc_of = |a0: u32| (a0 & 0x3fff_ffff) | 0x4000_0000;
+    let mut chain = Vec::new();
+    let mut pc = cpu.pc;
+    let mut sp = 0;
+    for k in 0..16u32 {
+        let frame = (wb + 16 - k) % 16;
+        if k > 0 && ws & (1 << frame) == 0 {
+            continue;
+        }
+        let a0 = cpu.ar[(frame * 4) as usize];
+        sp = cpu.ar[(frame * 4 + 1) as usize];
+        chain.push((pc, sp));
+        if a0 == 0 {
+            return chain;
+        }
+        pc = pc_of(a0);
+    }
+    for _ in 0..64 {
+        let (Some(a0), Some(caller_sp)) = (
+            soc.read_u32(sp.wrapping_sub(16)),
+            soc.read_u32(sp.wrapping_sub(12)),
+        ) else {
+            break;
+        };
+        chain.push((pc, caller_sp));
+        if a0 == 0 || caller_sp <= sp {
+            break;
+        }
+        pc = pc_of(a0);
+        sp = caller_sp;
+    }
+    chain
 }

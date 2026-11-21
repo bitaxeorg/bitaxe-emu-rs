@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use crate::devices::cache::MMU_ENTRIES;
 use crate::devices::gdma::DmaMemory;
-use crate::devices::{GDMA_BASE, Peripherals};
+use crate::devices::{GDMA_BASE, Peripherals, WIFI_MAC_BASE, wifi_mac};
 use rax::isa::xtensa::XtensaBus;
 
 /// Internal ROM, I-bus view.
@@ -50,10 +50,26 @@ pub struct Soc {
     /// When set, every peripheral access: (address, value, write, PC), oldest first. The cores
     /// then run one instruction at a time to know the PC.
     pub mmio_log: Option<std::collections::VecDeque<(u32, u32, bool, u32)>>,
-    /// PC of the instruction running, while [`Soc::mmio_log`] is set.
+    /// PC of the instruction running, while [`Soc::mmio_log`] or [`Soc::watch`] is set.
     pub trace_pc: u32,
+    /// When set, a memory range whose writes by the cores are logged in
+    /// [`Soc::watch_log`]: (address, value, PC). The cores then run one
+    /// instruction at a time.
+    pub watch: Option<std::ops::Range<u32>>,
+    pub watch_log: Vec<(u32, u32, u32)>,
+    /// Stack pointer and call chain of each write in [`Soc::watch_log`].
+    pub watch_chains: Vec<(u32, Vec<(u32, u32)>)>,
+    /// When set, a stack (of PRO_CPU) whose deepest point is kept in
+    /// [`Soc::stack_low`]: stack pointer and call chain.
+    pub stack_watch: Option<std::ops::Range<u32>>,
+    pub stack_low: Option<(u32, Vec<(u32, u32)>)>,
     /// Entries kept in [`Soc::mmio_log`].
     pub mmio_log_cap: usize,
+    /// The radio environment of the Wi-Fi MAC: without it, the frames sent are
+    /// dropped and none is received.
+    pub air: Option<Box<dyn crate::net::Air>>,
+    /// Next time [`Soc::poll_wifi`] asks the air for frames.
+    next_air_poll: u64,
     /// Instruction count at the start of the current slice, and its time.
     slice_icount: u64,
     slice_ticks: u64,
@@ -95,7 +111,14 @@ impl Soc {
             unmodelled: BTreeMap::new(),
             mmio_log: None,
             trace_pc: 0,
+            watch: None,
+            watch_log: Vec::new(),
+            watch_chains: Vec::new(),
+            stack_watch: None,
+            stack_low: None,
             mmio_log_cap: 4096,
+            air: None,
+            next_air_poll: 0,
             slice_icount: 0,
             slice_ticks: 0,
             cycle_ticks: 60,
@@ -339,6 +362,50 @@ impl Soc {
                 self.periph.irq_dirty = true;
             }
         }
+        if (WIFI_MAC_BASE..WIFI_MAC_BASE + wifi_mac::SIZE).contains(&addr)
+            && self.periph.wifi.needs_service()
+        {
+            let mut mem = DmaBus {
+                sram: &mut self.sram,
+                psram: &mut self.periph.psram.data,
+                mmu: &self.periph.cache.mmu,
+            };
+            self.periph.wifi.service(&mut mem, now);
+        }
+    }
+
+    /// Hands the frames the Wi-Fi MAC sent to the air, takes those it receives
+    /// (at most every millisecond), and writes them into the receive
+    /// descriptors.
+    pub fn poll_wifi(&mut self, now: u64) {
+        let wifi = &mut self.periph.wifi;
+        match self.air.as_mut() {
+            Some(air) => {
+                while let Some(frame) = wifi.tx_frames.pop_front() {
+                    air.transmit(&frame, now);
+                }
+                if now >= self.next_air_poll {
+                    air.poll(now, &mut wifi.rx_frames);
+                    self.next_air_poll = now + crate::machine::TICK_HZ / 1000;
+                }
+            }
+            None => wifi.tx_frames.clear(),
+        }
+        if !wifi.rx_frames.is_empty() {
+            let mut mem = DmaBus {
+                sram: &mut self.sram,
+                psram: &mut self.periph.psram.data,
+                mmu: &self.periph.cache.mmu,
+            };
+            if self.periph.wifi.deliver(&mut mem, now) {
+                self.periph.irq_dirty = true;
+            }
+        }
+    }
+
+    /// Time of the next frame the air has for the chip.
+    pub fn air_event(&self) -> Option<u64> {
+        self.air.as_ref().and_then(|a| a.next_event())
     }
 }
 
@@ -480,6 +547,12 @@ impl XtensaBus for Soc {
 
     #[inline]
     fn write8(&mut self, addr: u32, value: u8) -> Result<(), ()> {
+        if let Some(w) = &self.watch
+            && addr < w.end
+            && addr + 1 > w.start
+        {
+            self.watch_log.push((addr, u32::from(value), self.trace_pc));
+        }
         if let Some(b) = self.mem_mut(addr, 1) {
             b[0] = value;
             return Ok(());
@@ -494,6 +567,12 @@ impl XtensaBus for Soc {
 
     #[inline]
     fn write16(&mut self, addr: u32, value: u16) -> Result<(), ()> {
+        if let Some(w) = &self.watch
+            && addr < w.end
+            && addr + 2 > w.start
+        {
+            self.watch_log.push((addr, u32::from(value), self.trace_pc));
+        }
         if let Some(b) = self.mem_mut(addr, 2) {
             b.copy_from_slice(&value.to_le_bytes());
             return Ok(());
@@ -508,6 +587,12 @@ impl XtensaBus for Soc {
 
     #[inline]
     fn write32(&mut self, addr: u32, value: u32) -> Result<(), ()> {
+        if let Some(w) = &self.watch
+            && addr < w.end
+            && addr + 4 > w.start
+        {
+            self.watch_log.push((addr, value, self.trace_pc));
+        }
         if let Some(b) = self.mem_mut(addr, 4) {
             b.copy_from_slice(&value.to_le_bytes());
             return Ok(());

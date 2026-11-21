@@ -12,6 +12,10 @@ use esp32s3_emu::machine::{Event, TICK_HZ};
 use crate::board::{self, Board, Regulator, Screen};
 use crate::logs::Logs;
 
+/// The network around the chip, set once at start; `None` for no Wi-Fi.
+pub static NETWORK: std::sync::OnceLock<Option<esp32s3_emu::net::NetworkConfig>> =
+    std::sync::OnceLock::new();
+
 /// Lines of log kept for the GUI.
 const LOG_LINES: usize = 200;
 /// OLED pixel colours, lit and dark.
@@ -92,7 +96,14 @@ impl Emulator {
     }
 
     /// An emulator publishing into `snapshot`.
-    pub fn with_snapshot(board: Board, elf: Option<&[u8]>, snapshot: Arc<Mutex<Snapshot>>) -> Self {
+    pub fn with_snapshot(
+        mut board: Board,
+        elf: Option<&[u8]>,
+        snapshot: Arc<Mutex<Snapshot>>,
+    ) -> Self {
+        if let Some(Some(cfg)) = NETWORK.get() {
+            board.machine.soc.air = Some(Box::new(esp32s3_emu::net::Network::new(cfg.clone())));
+        }
         Emulator {
             board,
             logs: Logs::new(elf),
@@ -123,7 +134,19 @@ impl Emulator {
             })
             .collect();
         script.sort();
+        // Paced to the wall clock, for the network: the host's sockets run in
+        // real time.
+        let realtime = std::env::var_os("BITAXE_EMU_REALTIME").is_some();
+        let emu_start = self.board.machine.now;
         while self.board.machine.now < end {
+            if realtime {
+                let emu = Duration::from_secs_f64(
+                    (self.board.machine.now - emu_start) as f64 / TICK_HZ as f64,
+                );
+                if let Some(ahead) = emu.checked_sub(started.elapsed()) {
+                    std::thread::sleep(ahead);
+                }
+            }
             while let Some((t, action)) = script.first().cloned()
                 && t <= self.board.machine.now
             {
@@ -247,6 +270,23 @@ impl Emulator {
 
     fn slice(&mut self, deadline: u64) {
         let events = self.board.run_until(deadline, TICK_HZ / 1000);
+        if let Some(air) = self.board.machine.soc.air.as_mut() {
+            for line in air.take_events() {
+                self.push_log(line);
+            }
+        }
+        if std::env::var_os("BITAXE_EMU_WIFI_STATS").is_some()
+            && self.board.machine.now / TICK_HZ != deadline.saturating_sub(TICK_HZ / 100) / TICK_HZ
+        {
+            let wifi = &self.board.machine.soc.periph.wifi;
+            let (next, last, queued) = wifi.rx_state();
+            let st = wifi.stats;
+            let line = format!(
+                "wifi mac: tx {} rx {} dropped {} queued {queued} next {next:#010x} last {last:#010x}",
+                st.tx, st.rx, st.rx_dropped
+            );
+            self.push_log(line);
+        }
         if let Some(samples) = self.pc_samples.as_mut() {
             // The live call chain from the register windows, as one key.
             let cpu = &self.board.machine.cpu;

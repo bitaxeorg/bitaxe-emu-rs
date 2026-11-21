@@ -102,6 +102,10 @@ An option or its variable overrides the choice kept from the window.
 | `--branch <name>` (`main` for esp-miner-rs, `master` for ESP-Miner; for a release, its tag, `latest` by default) | `BITAXE_EMU_BRANCH` | firmware menu, branch or version |
 | `--rom <file>` (by default the image of the build: `ESP32S3_ROM` at build time, which the Nix package sets, else `../upstream/qemu-espressif/pc-bios/esp32s3_rev0_rom.bin`) | `BITAXE_EMU_ROM` | Settings |
 | `--mac <address>` (default `7c:df:a1:0b:17:ae`) | `BITAXE_EMU_MAC` | Settings |
+| `--wifi-ssid <name>` (the open access point the chip can join, default `bitaxe-emu`) | `BITAXE_EMU_WIFI_SSID` | — |
+| `--http-port <port>` (host port forwarded to the chip's web server, default 8080, 0 for none) | `BITAXE_EMU_HTTP_PORT` | — |
+| `--no-wifi` (no network around the chip) | `BITAXE_EMU_NO_WIFI` | — |
+| `--wifi-trace` (log every Wi-Fi frame, with the ARP, IPv4, UDP and TCP headers of the data frames) | `BITAXE_EMU_WIFI_TRACE` | — |
 | `--persist [true\|false]` (write the flash back to its file when the emulator stops, keeping the settings the firmware saved) | `BITAXE_EMU_PERSIST` | Settings |
 | `--display-png <file>` (where to save the display's image) | `BITAXE_EMU_DISPLAY_PNG` | Settings, Save as PNG |
 | `--headless <seconds>` (run without a window, print the logs and the OLED as text) | `BITAXE_EMU_HEADLESS` | — |
@@ -115,6 +119,31 @@ bitaxe-emu --flash esp-miner-rs-bitaxe-601.bin --elf esp-miner-rs --headless 10
 BITAXE_EMU_FIRMWARE=esp-miner-rs BITAXE_EMU_BOARD=1300 bitaxe-emu
 ```
 
+### Wi-Fi
+
+The chip's Wi-Fi MAC is emulated (`esp32s3-emu/docs/wifi-mac.md`; the radio is
+not: every frame arrives at -40 dBm on channel 1), and the emulator surrounds it
+with a small network, in pure Rust:
+
+- an open access point, `bitaxe-emu` (`--wifi-ssid`), that answers scans and
+  lets the chip's station join; behind it a router (smoltcp) gives the chip
+  10.0.2.15/24 by DHCP (gateway and DNS 10.0.2.2), forwards its DNS queries to
+  the host's resolver and carries its UDP and TCP connections out through the
+  host's sockets (NAT; 10.0.2.2 itself means the host). The firmware reaches its
+  pool this way;
+- a station that joins the chip's own access point (the open setup network of
+  AxeOS and esp-miner-rs) and takes an address from it;
+- `http://localhost:8080/` (`--http-port`) reaches the chip's web server through
+  whichever is connected: the router once the chip has joined `bitaxe-emu`,
+  else the station on the chip's setup network. A firmware without Wi-Fi
+  settings is thus configured from the host: enter `bitaxe-emu` and no password
+  on its setup page, save, restart.
+
+The host's sockets run in real time: the window paces the emulation to the wall
+clock, and `BITAXE_EMU_REALTIME=1` does the same for a headless run. WPA2 is not
+emulated (the access point is open), nor are the beacons of the chip's own
+access point (its clients find it by probing).
+
 Debugging aids, all optional: `BITAXE_EMU_SCRIPT="2.0:boot_down,4.6:boot_up,6:reset"`
 presses buttons at given times in headless runs, `BITAXE_EMU_MMIO_LOG=1` prints
 the last peripheral accesses, `BITAXE_EMU_PROFILE=1` samples the call chains,
@@ -122,6 +151,16 @@ the last peripheral accesses, `BITAXE_EMU_PROFILE=1` samples the call chains,
 `BITAXE_EMU_DUMP="0x40370000:0x70000:iram.bin,..."` saves memory ranges at the
 end of a headless run, and `BITAXE_EMU_CONSOLE_DUMP=<prefix>` appends the raw
 UART0 and USB-Serial-JTAG output to `<prefix>.uart` and `<prefix>.usb`.
+`BITAXE_EMU_MMIO_LOG` also gives the PC of each access. Memory corruption and
+stack overflows: `BITAXE_EMU_WATCH="0x3fcd4b08:4"` logs every write the cores
+make to a range, with the PC, stack pointer and call chain;
+`BITAXE_EMU_STACK_WATCH="0x3fc88000:0x3fcdb700"` reports the deepest function
+frame of PRO_CPU in a stack range (checked at each `ENTRY`), with its call
+chain; `BITAXE_EMU_BREAK="0x4037c232,..."` records the registers and call chain
+of the cores at given addresses (the first 16 times); `BITAXE_EMU_WIFI_STATS=1`
+logs the Wi-Fi MAC counters every second. Those three run the cores one
+instruction at a time, as does the MMIO log. The headless report ends with the
+interrupt sources routed to PRO_CPU (`source>line`, `!` when raised).
 
 ### Building
 
@@ -176,9 +215,9 @@ its hash in `nix/package.nix`.
 
 ## Limits
 
-- WiFi is not emulated: the radio's registers answer the calibration polls, so
-  the firmware starts its access point, but no packet goes in or out. Without a
-  network there is no pool and no job, so the chips stay idle.
+- The radio is not emulated: its registers answer the calibration polls, and
+  frames are exchanged whole with the emulated network (see Wi-Fi). Without
+  WPA2, the chip joins only an open network, the emulator's.
 - Hashing on the host is far slower than the chips: at the usual ticket
   difficulties a nonce is rare. The chips' hash counters run at full rate, so
   ESP-Miner, which reads its hashrate from them, sees the expected figure, but

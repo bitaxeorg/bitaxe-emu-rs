@@ -14,3 +14,4 @@ rax = { path = "../../upstream/rax", default-features = false }
 clap = { version = "4.6", features = ["derive"] }
 goblin = "0.10"
 sha2 = { version = "0.10", features = ["compress"] }
+smoltcp = { version = "0.14", default-features = false, features = ["std", "medium-ethernet", "proto-ipv4", "socket-tcp", "socket-dhcpv4"] }
