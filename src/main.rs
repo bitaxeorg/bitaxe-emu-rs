@@ -75,9 +75,13 @@ struct Args {
     /// the window's Save button.
     #[arg(long, env = "BITAXE_EMU_DISPLAY_PNG", alias = "oled-png")]
     display_png: Option<PathBuf>,
-    /// SSID of the open Wi-Fi access point the emulator offers to the chip.
+    /// SSID of the Wi-Fi access point the emulator offers to the chip.
     #[arg(long, env = "BITAXE_EMU_WIFI_SSID", default_value = "bitaxe-emu")]
     wifi_ssid: String,
+    /// WPA2-Personal passphrase of that access point (8 to 63 characters); empty
+    /// for an open network.
+    #[arg(long, env = "BITAXE_EMU_WIFI_PASS", default_value = "bitaxe-emu", value_parser = parse_passphrase)]
+    wifi_pass: String,
     /// Host port (on 127.0.0.1) forwarded to the chip's web server, through the
     /// emulated access point or the chip's own; 0 for none.
     #[arg(long, env = "BITAXE_EMU_HTTP_PORT", default_value_t = 8080)]
@@ -97,6 +101,16 @@ struct Args {
     decode_rtt: Option<PathBuf>,
 }
 
+/// A WPA2 passphrase: 8 to 63 printable ASCII characters, or empty.
+fn parse_passphrase(s: &str) -> Result<String, String> {
+    let printable = s.bytes().all(|b| (0x20..0x7f).contains(&b));
+    if s.is_empty() || (8..=63).contains(&s.len()) && printable {
+        Ok(s.into())
+    } else {
+        Err("a WPA2 passphrase has 8 to 63 printable ASCII characters (empty: open)".into())
+    }
+}
+
 fn main() {
     let args = Args::parse();
     if let (Some(dump), Some(elf)) = (&args.decode_rtt, &args.elf) {
@@ -106,6 +120,7 @@ fn main() {
     emu::SKIP_SELF_TEST.store(args.skip_self_test, std::sync::atomic::Ordering::Relaxed);
     let _ = emu::NETWORK.set((!args.no_wifi).then(|| esp32s3_rax::net::NetworkConfig {
         ssid: args.wifi_ssid.clone(),
+        passphrase: (!args.wifi_pass.is_empty()).then(|| args.wifi_pass.clone()),
         trace: args.wifi_trace,
         forwards: if args.http_port == 0 {
             Vec::new()

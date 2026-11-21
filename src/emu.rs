@@ -292,8 +292,8 @@ impl Emulator {
             let (next, last, queued) = wifi.rx_state();
             let st = wifi.stats;
             let line = format!(
-                "wifi mac: tx {} rx {} dropped {} queued {queued} next {next:#010x} last {last:#010x}",
-                st.tx, st.rx, st.rx_dropped
+                "wifi mac: tx {} rx {} dropped {} no key {}/{} queued {queued} next {next:#010x} last {last:#010x}",
+                st.tx, st.rx, st.rx_dropped, st.tx_no_key, st.rx_undecrypted
             );
             self.push_log(line);
         }

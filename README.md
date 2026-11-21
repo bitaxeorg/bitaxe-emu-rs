@@ -103,7 +103,8 @@ An option or its variable overrides the choice kept from the window.
 | `--branch <name>` (`main` for esp-miner-rs, `master` for ESP-Miner; for a release, its tag, `latest` by default) | `BITAXE_EMU_BRANCH` | firmware menu, branch or version |
 | `--rom <file>` (by default the image of the build: `ESP32S3_ROM` at build time, which the Nix package sets, else `../upstream/qemu-espressif/pc-bios/esp32s3_rev0_rom.bin`) | `BITAXE_EMU_ROM` | Settings |
 | `--mac <address>` (default `7c:df:a1:0b:17:ae`) | `BITAXE_EMU_MAC` | Settings |
-| `--wifi-ssid <name>` (the open access point the chip can join, default `bitaxe-emu`) | `BITAXE_EMU_WIFI_SSID` | — |
+| `--wifi-ssid <name>` (the access point the chip can join, default `bitaxe-emu`) | `BITAXE_EMU_WIFI_SSID` | — |
+| `--wifi-pass <passphrase>` (its WPA2-Personal passphrase, 8 to 63 characters, default `bitaxe-emu`; empty for an open network) | `BITAXE_EMU_WIFI_PASS` | — |
 | `--http-port <port>` (host port forwarded to the chip's web server, default 8080, 0 for none) | `BITAXE_EMU_HTTP_PORT` | — |
 | `--no-wifi` (no network around the chip) | `BITAXE_EMU_NO_WIFI` | — |
 | `--skip-self-test` (clear ESP-Miner's factory self-test flag, `selftest` in the NVS of the flash, before boot) | `BITAXE_EMU_SKIP_SELF_TEST` | — |
@@ -127,8 +128,11 @@ The chip's Wi-Fi MAC is emulated (`esp32s3-rax/docs/wifi-mac.md`; the radio is
 not: every frame arrives at -40 dBm on channel 1), and the emulator surrounds it
 with a small network, in pure Rust:
 
-- an open access point, `bitaxe-emu` (`--wifi-ssid`), that answers scans and
-  lets the chip's station join; behind it a router (smoltcp) gives the chip
+- an access point, `bitaxe-emu` (`--wifi-ssid`), WPA2-Personal with the
+  passphrase `bitaxe-emu` (`--wifi-pass`; empty for an open network), that
+  answers scans, runs the 4-way handshake and lets the chip's station join
+  (its frames are CCMP-protected, which the chip's MAC does in hardware);
+  behind it a router (smoltcp) gives the chip
   10.0.2.15/24 by DHCP (gateway and DNS 10.0.2.2), forwards its DNS queries to
   the host's resolver and carries its UDP and TCP connections out through the
   host's sockets (NAT; 10.0.2.2 itself means the host). The firmware reaches its
@@ -138,13 +142,15 @@ with a small network, in pure Rust:
 - `http://localhost:8080/` (`--http-port`) reaches the chip's web server through
   whichever is connected: the router once the chip has joined `bitaxe-emu`,
   else the station on the chip's setup network. A firmware without Wi-Fi
-  settings is thus configured from the host: enter `bitaxe-emu` and no password
-  on its setup page, save, restart.
+  settings is thus configured from the host: enter `bitaxe-emu` and the
+  password `bitaxe-emu` on its setup page, save, restart. A firmware set up for
+  an open network does not try the default one: give it the password, or run
+  the emulator with `--wifi-pass ""`.
 
 The host's sockets run in real time: the window paces the emulation to the wall
-clock, and `BITAXE_EMU_REALTIME=1` does the same for a headless run. WPA2 is not
-emulated (the access point is open), nor are the beacons of the chip's own
-access point (its clients find it by probing).
+clock, and `BITAXE_EMU_REALTIME=1` does the same for a headless run. The
+beacons of the chip's own access point are not emulated (its clients find it by
+probing).
 
 Debugging aids, all optional: `BITAXE_EMU_SCRIPT="2.0:boot_down,4.6:boot_up,6:reset"`
 presses buttons at given times in headless runs, `BITAXE_EMU_MMIO_LOG=1` prints
@@ -220,11 +226,11 @@ its hash in `nix/package.nix`.
 ## Limits
 
 - The radio is not emulated: its registers answer the calibration polls, and
-  frames are exchanged whole with the emulated network (see Wi-Fi). Without
-  WPA2, the chip joins only an open network, the emulator's. ESP-Miner cannot
-  join one: it reads an empty password back as its build default
-  (`mypassword`) and then requires WPA2, so its station mode is not reached;
-  its setup access point and AxeOS are (`http://localhost:8080/`).
+  frames are exchanged whole with the emulated network (see Wi-Fi). Its
+  security is WPA2-Personal with CCMP, or none: no WPA3, WEP or TKIP.
+  ESP-Miner cannot join an open network (it reads an empty password back as
+  its build default, `mypassword`, then requires WPA2); it joins the default
+  WPA2 one.
 - Hashing on the host is far slower than the chips: at the usual ticket
   difficulties a nonce is rare. The chips' hash counters run at full rate, so
   ESP-Miner, which reads its hashrate from them, sees the expected figure, but
