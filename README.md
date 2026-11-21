@@ -106,6 +106,7 @@ An option or its variable overrides the choice kept from the window.
 | `--wifi-ssid <name>` (the open access point the chip can join, default `bitaxe-emu`) | `BITAXE_EMU_WIFI_SSID` | — |
 | `--http-port <port>` (host port forwarded to the chip's web server, default 8080, 0 for none) | `BITAXE_EMU_HTTP_PORT` | — |
 | `--no-wifi` (no network around the chip) | `BITAXE_EMU_NO_WIFI` | — |
+| `--skip-self-test` (clear ESP-Miner's factory self-test flag, `selftest` in the NVS of the flash, before boot) | `BITAXE_EMU_SKIP_SELF_TEST` | — |
 | `--wifi-trace` (log every Wi-Fi frame, with the ARP, IPv4, UDP and TCP headers of the data frames) | `BITAXE_EMU_WIFI_TRACE` | — |
 | `--persist [true\|false]` (write the flash back to its file when the emulator stops, keeping the settings the firmware saved) | `BITAXE_EMU_PERSIST` | Settings |
 | `--display-png <file>` (where to save the display's image) | `BITAXE_EMU_DISPLAY_PNG` | Settings, Save as PNG |
@@ -157,8 +158,9 @@ stack overflows: `BITAXE_EMU_WATCH="0x3fcd4b08:4"` logs every write the cores
 make to a range, with the PC, stack pointer and call chain;
 `BITAXE_EMU_STACK_WATCH="0x3fc88000:0x3fcdb700"` reports the deepest function
 frame of PRO_CPU in a stack range (checked at each `ENTRY`), with its call
-chain; `BITAXE_EMU_BREAK="0x4037c232,..."` records the registers and call chain
-of the cores at given addresses (the first 16 times); `BITAXE_EMU_WIFI_STATS=1`
+chain; `BITAXE_EMU_BREAK="0x4037c232,..."` records the time, registers and call
+chain of the cores at given addresses (the first 16 times, from
+`BITAXE_EMU_BREAK_FROM` seconds if set); `BITAXE_EMU_WIFI_STATS=1`
 logs the Wi-Fi MAC counters every second. Those three run the cores one
 instruction at a time, as does the MMIO log. The headless report ends with the
 interrupt sources routed to PRO_CPU (`source>line`, `!` when raised).
@@ -219,12 +221,18 @@ its hash in `nix/package.nix`.
 
 - The radio is not emulated: its registers answer the calibration polls, and
   frames are exchanged whole with the emulated network (see Wi-Fi). Without
-  WPA2, the chip joins only an open network, the emulator's.
+  WPA2, the chip joins only an open network, the emulator's. ESP-Miner cannot
+  join one: it reads an empty password back as its build default
+  (`mypassword`) and then requires WPA2, so its station mode is not reached;
+  its setup access point and AxeOS are (`http://localhost:8080/`).
 - Hashing on the host is far slower than the chips: at the usual ticket
   difficulties a nonce is rare. The chips' hash counters run at full rate, so
   ESP-Miner, which reads its hashrate from them, sees the expected figure, but
-  its self-test also counts nonces and fails its total hashrate check (hold
-  BOOT for 2 s to skip the self-test).
+  its self-test also counts nonces and fails its total hashrate check:
+  `--skip-self-test` skips it. Holding BOOT does not, on ESP-Miner since
+  `3a09ea0` (v2.15.4 included): LVGL's keypad input sends no event while
+  nothing in its group has focus, and the object ESP-Miner adds to the group
+  is hidden, so the long press is never seen.
 - The interpreter runs at about 60 MIPS for both cores together (some 180 host
   instructions per emulated one): a busy firmware runs below real time, an
   idle one faster (the time a core spends in WAITI is skipped). After boot,

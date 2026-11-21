@@ -8,6 +8,7 @@ mod firmware;
 mod github;
 mod gui;
 mod logs;
+mod nvs;
 
 use std::path::PathBuf;
 
@@ -81,6 +82,10 @@ struct Args {
     /// emulated access point or the chip's own; 0 for none.
     #[arg(long, env = "BITAXE_EMU_HTTP_PORT", default_value_t = 8080)]
     http_port: u16,
+    /// Clear ESP-Miner's factory self-test flag in the flash's NVS before boot (the
+    /// emulated chips cannot pass the self-test, which counts nonces).
+    #[arg(long, env = "BITAXE_EMU_SKIP_SELF_TEST")]
+    skip_self_test: bool,
     /// No Wi-Fi network around the chip.
     #[arg(long, env = "BITAXE_EMU_NO_WIFI")]
     no_wifi: bool,
@@ -98,6 +103,7 @@ fn main() {
         decode_rtt_dump(&std::fs::read(dump).unwrap(), &std::fs::read(elf).unwrap());
         return;
     }
+    emu::SKIP_SELF_TEST.store(args.skip_self_test, std::sync::atomic::Ordering::Relaxed);
     let _ = emu::NETWORK.set((!args.no_wifi).then(|| esp32s3_rax::net::NetworkConfig {
         ssid: args.wifi_ssid.clone(),
         trace: args.wifi_trace,
@@ -196,6 +202,12 @@ fn main() {
         Some(a..a + n.parse::<u32>().ok()?)
     }) {
         emulator.board.machine.soc.watch = Some(range);
+    }
+    if let Some(from) = std::env::var("BITAXE_EMU_BREAK_FROM")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+    {
+        emulator.board.machine.break_from = (from * esp32s3_rax::machine::TICK_HZ as f64) as u64;
     }
     for pc in std::env::var("BITAXE_EMU_BREAK")
         .unwrap_or_default()
@@ -344,7 +356,8 @@ fn main() {
             .map(|(a, s)| format!("{a:#010x}@{s:#010x}"))
             .collect();
         eprintln!(
-            "break core {} a2.. {} chain {}",
+            "break {:.6} s core {} a2.. {} chain {}",
+            hit.time as f64 / esp32s3_rax::machine::TICK_HZ as f64,
             hit.core,
             regs.join(" "),
             chain.join(" ")

@@ -15,6 +15,10 @@ use crate::logs::Logs;
 /// The network around the chip, set once at start; `None` for no Wi-Fi.
 pub static NETWORK: std::sync::OnceLock<Option<esp32s3_rax::net::NetworkConfig>> =
     std::sync::OnceLock::new();
+/// Clear ESP-Miner's factory self-test flag in the NVS before boot: the
+/// emulated chips cannot find the nonces the self-test counts.
+pub static SKIP_SELF_TEST: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// Lines of log kept for the GUI.
 const LOG_LINES: usize = 200;
@@ -104,7 +108,9 @@ impl Emulator {
         if let Some(Some(cfg)) = NETWORK.get() {
             board.machine.soc.air = Some(Box::new(esp32s3_rax::net::Network::new(cfg.clone())));
         }
-        Emulator {
+        let self_test_cleared = SKIP_SELF_TEST.load(std::sync::atomic::Ordering::Relaxed)
+            && crate::nvs::set_unsigned(&mut board.machine.periph().flash.data, "selftest", 0) > 0;
+        let mut emulator = Emulator {
             board,
             logs: Logs::new(elf),
             snapshot,
@@ -114,7 +120,11 @@ impl Emulator {
             display_generation: 0,
             pc_samples: std::env::var_os("BITAXE_EMU_PROFILE").map(|_| Default::default()),
             flash_file: None,
+        };
+        if self_test_cleared {
+            emulator.push_log("cleared the self-test flag in the NVS (--skip-self-test)".into());
         }
+        emulator
     }
 
     /// Runs for `seconds` of emulated time as fast as possible, printing the logs.
