@@ -678,7 +678,7 @@ impl App {
                         row.child()
                             .build(|ui: Ui<'_>| label(ui, "ROM image", 110.0));
                         row.child()
-                            .build(|ui: Ui<'_>| field(ui, rom, 420.0, esp32s3_emu::DEFAULT_ROM))
+                            .build(|ui: Ui<'_>| field(ui, rom, 420.0, esp32s3_rax::DEFAULT_ROM))
                     };
                     let (mac_entered, restart) = {
                         let mut row = menu
@@ -696,7 +696,7 @@ impl App {
                     };
                     if rom_entered || mac_entered || restart {
                         let rom_path = match rom.value.trim() {
-                            "" => PathBuf::from(esp32s3_emu::DEFAULT_ROM),
+                            "" => PathBuf::from(esp32s3_rax::DEFAULT_ROM),
                             path => expand_home(path),
                         };
                         match firmware::parse_mac(&mac.value) {

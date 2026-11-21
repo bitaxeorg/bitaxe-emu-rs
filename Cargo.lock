@@ -198,7 +198,7 @@ dependencies = [
  "blit-text-parley",
  "clap",
  "defmt-decoder",
- "esp32s3-emu",
+ "esp32s3-rax",
  "goblin",
  "md-5",
  "png",
@@ -858,7 +858,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "esp32s3-emu"
+name = "esp32s3-rax"
 version = "0.1.0"
 dependencies = [
  "clap",

@@ -1,7 +1,7 @@
 //! EMC2101 fan controller and temperature sensor: a register file with the
 //! temperatures and the tachometer computed from the board state.
 
-use esp32s3_emu::devices::i2c::I2cDevice;
+use esp32s3_rax::devices::i2c::I2cDevice;
 
 const INTERNAL_TEMP: usize = 0x00;
 const EXTERNAL_TEMP_MSB: usize = 0x01;

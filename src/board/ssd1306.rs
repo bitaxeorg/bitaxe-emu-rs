@@ -1,7 +1,7 @@
 //! SSD1306 OLED controller on I2C: command and data streams, the 128×64 display
 //! RAM with its three addressing modes, and the panel image (128×`rows`).
 
-use esp32s3_emu::devices::i2c::I2cDevice;
+use esp32s3_rax::devices::i2c::I2cDevice;
 
 pub const WIDTH: usize = 128;
 const PAGES: usize = 8;

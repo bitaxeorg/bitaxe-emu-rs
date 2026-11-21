@@ -15,6 +15,8 @@
   vulkan-loader,
   # rax source tree, for the Xtensa LX7 core.
   rax,
+  # esp32s3-rax source tree, the ESP32-S3 on rax.
+  esp32s3-rax,
 }:
 
 let
@@ -51,7 +53,6 @@ rustPlatform.buildRustPackage {
       ../Cargo.toml
       ../Cargo.lock
       ../src
-      ../esp32s3-emu
       (lib.fileset.fileFilter (file: file.hasExt "png") ../assets)
       ../assets/esp32s3-bootloader.bin
     ];
@@ -64,9 +65,15 @@ rustPlatform.buildRustPackage {
     };
   };
 
+  # esp32s3-rax is a path dependency next to the checkout, and rax one next to
+  # esp32s3-rax: a copy of esp32s3-rax in the source, pointing to the rax tree.
   postPatch = ''
-    substituteInPlace esp32s3-emu/Cargo.toml \
-      --replace-fail '"../../upstream/rax"' '"${rax}"'
+    cp -r ${esp32s3-rax} esp32s3-rax
+    chmod -R u+w esp32s3-rax
+    substituteInPlace esp32s3-rax/Cargo.toml \
+      --replace-fail '"../upstream/rax"' '"${rax}"'
+    substituteInPlace Cargo.toml \
+      --replace-fail '"../esp32s3-rax"' '"./esp32s3-rax"'
   '';
 
   nativeBuildInputs = [
@@ -76,9 +83,19 @@ rustPlatform.buildRustPackage {
   ];
   buildInputs = [ zstd ];
 
-  # Both binaries: bitaxe-emu and esp32s3-run.
-  cargoBuildFlags = [ "--workspace" ];
-  cargoTestFlags = [ "--workspace" ];
+  # Both binaries: bitaxe-emu and esp32s3-run (of esp32s3-rax).
+  cargoBuildFlags = [
+    "-p"
+    "bitaxe-emu-rs"
+    "-p"
+    "esp32s3-rax"
+  ];
+  cargoTestFlags = [
+    "-p"
+    "bitaxe-emu-rs"
+    "-p"
+    "esp32s3-rax"
+  ];
 
   env = {
     BITAXE_EMU_FONT = "${fonts}/DejaVuSans.ttf";
@@ -116,7 +133,7 @@ rustPlatform.buildRustPackage {
   # The RPATH is extended after the fixup, which drops the entries no DT_NEEDED
   # uses.
   postFixup = ''
-    remove-references-to -t ${rax} $out/bin/*
+    remove-references-to -t ${rax} -t ${esp32s3-rax} $out/bin/*
     patchelf --add-rpath ${lib.makeLibraryPath runtimeLibs} $out/bin/bitaxe-emu
   '';
 

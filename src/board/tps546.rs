@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use esp32s3_emu::devices::i2c::I2cDevice;
+use esp32s3_rax::devices::i2c::I2cDevice;
 
 const OPERATION: u8 = 0x01;
 const CLEAR_FAULTS: u8 = 0x03;

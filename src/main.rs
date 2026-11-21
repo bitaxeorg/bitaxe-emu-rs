@@ -1,4 +1,4 @@
-//! Bitaxe emulator: a Bitaxe board whose ESP32-S3 (`esp32s3-emu`) runs the miner
+//! Bitaxe emulator: a Bitaxe board whose ESP32-S3 (`esp32s3-rax`) runs the miner
 //! firmware, with its board devices modelled, shown front side up with its
 //! display.
 
@@ -98,7 +98,7 @@ fn main() {
         decode_rtt_dump(&std::fs::read(dump).unwrap(), &std::fs::read(elf).unwrap());
         return;
     }
-    let _ = emu::NETWORK.set((!args.no_wifi).then(|| esp32s3_emu::net::NetworkConfig {
+    let _ = emu::NETWORK.set((!args.no_wifi).then(|| esp32s3_rax::net::NetworkConfig {
         ssid: args.wifi_ssid.clone(),
         trace: args.wifi_trace,
         forwards: if args.http_port == 0 {
@@ -258,7 +258,7 @@ fn main() {
         let periph = &mut emulator.board.machine.soc.periph;
         let levels = periph.source_levels();
         let mut routed = Vec::new();
-        for src in 0..esp32s3_emu::devices::intmatrix::SOURCES {
+        for src in 0..esp32s3_rax::devices::intmatrix::SOURCES {
             let line = periph.intmatrix.read((src * 4) as u32, &levels) & 0x1f;
             if line != 6 {
                 routed.push(format!(

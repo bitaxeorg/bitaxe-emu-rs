@@ -452,7 +452,7 @@ impl Choice {
             source: Source::EspMinerRs {
                 branch: RS_BRANCH.into(),
             },
-            rom: esp32s3_emu::DEFAULT_ROM.into(),
+            rom: esp32s3_rax::DEFAULT_ROM.into(),
             mac: DEFAULT_MAC,
             persist: false,
         }
@@ -486,7 +486,7 @@ impl Choice {
         Some(Choice {
             board,
             source,
-            rom: get("rom").map_or_else(|| esp32s3_emu::DEFAULT_ROM.into(), PathBuf::from),
+            rom: get("rom").map_or_else(|| esp32s3_rax::DEFAULT_ROM.into(), PathBuf::from),
             mac: get("mac")
                 .and_then(|m| parse_mac(&m))
                 .unwrap_or(DEFAULT_MAC),
@@ -514,7 +514,7 @@ impl Choice {
                 }
             }
         }
-        if self.rom != Path::new(esp32s3_emu::DEFAULT_ROM) {
+        if self.rom != Path::new(esp32s3_rax::DEFAULT_ROM) {
             text += &format!("rom={}\n", self.rom.display());
         }
         if self.mac != DEFAULT_MAC {

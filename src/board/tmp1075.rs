@@ -1,6 +1,6 @@
 //! TMP1075 temperature sensor on the board.
 
-use esp32s3_emu::devices::i2c::I2cDevice;
+use esp32s3_rax::devices::i2c::I2cDevice;
 
 use super::pointer::WordAccess;
 

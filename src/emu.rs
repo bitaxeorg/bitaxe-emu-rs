@@ -7,13 +7,13 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use esp32s3_emu::machine::{Event, TICK_HZ};
+use esp32s3_rax::machine::{Event, TICK_HZ};
 
 use crate::board::{self, Board, Regulator, Screen};
 use crate::logs::Logs;
 
 /// The network around the chip, set once at start; `None` for no Wi-Fi.
-pub static NETWORK: std::sync::OnceLock<Option<esp32s3_emu::net::NetworkConfig>> =
+pub static NETWORK: std::sync::OnceLock<Option<esp32s3_rax::net::NetworkConfig>> =
     std::sync::OnceLock::new();
 
 /// Lines of log kept for the GUI.
@@ -102,7 +102,7 @@ impl Emulator {
         snapshot: Arc<Mutex<Snapshot>>,
     ) -> Self {
         if let Some(Some(cfg)) = NETWORK.get() {
-            board.machine.soc.air = Some(Box::new(esp32s3_emu::net::Network::new(cfg.clone())));
+            board.machine.soc.air = Some(Box::new(esp32s3_rax::net::Network::new(cfg.clone())));
         }
         Emulator {
             board,

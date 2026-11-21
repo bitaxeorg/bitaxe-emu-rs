@@ -1,7 +1,7 @@
 //! DS4432 dual current DAC (0x48): output 0 sources or sinks a current into the
 //! feedback node of the core regulator, moving its output voltage.
 
-use esp32s3_emu::devices::i2c::I2cDevice;
+use esp32s3_rax::devices::i2c::I2cDevice;
 
 use super::pointer::Pointer;
 

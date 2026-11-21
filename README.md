@@ -11,14 +11,15 @@ logs.
 |---|---|
 | ![The board menu](docs/screenshots/board-menu.png) | ![The firmware menu](docs/screenshots/firmware-menu.png) |
 
-The workspace has two crates:
+Two crates:
 
-- [`esp32s3-emu`](esp32s3-emu/README.md): the ESP32-S3. Its processor is
-  [rax](https://github.com/Georges760/rax/tree/feat/xtensa-esp32s3)'s Xtensa LX7
-  interpreter; the crate models the memory map, the boot from the internal ROM
-  and the peripherals, and has a headless runner, `esp32s3-run`. Nothing in it is
-  specific to the Bitaxe.
-- `bitaxe-emu` (the root crate): the boards around the chip and the window.
+- [`esp32s3-rax`](https://github.com/GPTechinno/esp32s3-rax), a repository of
+  its own, checked out next to this one (`../esp32s3-rax`): the ESP32-S3. Its
+  processor is [rax](https://github.com/Georges760/rax/tree/feat/xtensa-esp32s3)'s
+  Xtensa LX7 interpreter; the crate models the memory map, the boot from the
+  internal ROM, the peripherals and a Wi-Fi network around the chip, and has a
+  headless runner, `esp32s3-run`. Nothing in it is specific to the Bitaxe.
+- `bitaxe-emu` (this crate): the boards around the chip and the window.
 
 ## Boards
 
@@ -44,7 +45,7 @@ The models:
 
 | Part | Model |
 |---|---|
-| ESP32-S3 | `esp32s3-emu`: boots from its internal ROM through the 2nd-stage bootloader to the application, from the flash image |
+| ESP32-S3 | `esp32s3-rax`: boots from its internal ROM through the 2nd-stage bootloader to the application, from the flash image |
 | SSD1306 0.91" OLED, 128×32 (I2C 0x3C) | display RAM, addressing modes, remap, scan direction, start line, offset, invert |
 | ST7789 1.9" LCD, 320×170 (8-bit parallel bus on LCD_CAM, with DMA) | frame memory, address window, MADCTL access order, RGB565 byte order, inversion, sleep and display on/off; reset, panel power and backlight lines |
 | TPS546D24A (PMBus 0x24) | commands read back; IC_DEVICE_ID; VIN, VOUT, IOUT and temperature telemetry; output on/off |
@@ -121,7 +122,7 @@ BITAXE_EMU_FIRMWARE=esp-miner-rs BITAXE_EMU_BOARD=1300 bitaxe-emu
 
 ### Wi-Fi
 
-The chip's Wi-Fi MAC is emulated (`esp32s3-emu/docs/wifi-mac.md`; the radio is
+The chip's Wi-Fi MAC is emulated (`esp32s3-rax/docs/wifi-mac.md`; the radio is
 not: every frame arrives at -40 dBm on channel 1), and the emulator surrounds it
 with a small network, in pure Rust:
 
@@ -208,9 +209,10 @@ Or, without the module: `nixpkgs.overlays = [ bitaxe-emu.overlays.default ];`
 then `environment.systemPackages = [ pkgs.bitaxe-emu ];` (the same overlay
 works in Home Manager's `home.packages`). Both build with the system's nixpkgs.
 
-rax is fetched from GitHub at the revision pinned in `nix/rax.nix`; after a
-change of rax, push it, put the new commit in `rev`, empty `hash`, and
-`nix build` prints the hash to write there. A change of the BLIT revision in `Cargo.toml` needs the same for
+rax and esp32s3-rax are fetched from GitHub at the revisions pinned in
+`nix/rax.nix` and `nix/esp32s3-rax.nix`; after a change of either, push it, put
+the new commit in `rev`, empty `hash`, and `nix build` prints the hash to write
+there. A change of the BLIT revision in `Cargo.toml` needs the same for
 its hash in `nix/package.nix`.
 
 ## Limits

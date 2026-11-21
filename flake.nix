@@ -30,6 +30,7 @@
         bitaxe-emu = final.callPackage ./nix/package.nix {
           rust-bin = rust-overlay.lib.mkRustBin { } final;
           rax = final.callPackage ./nix/rax.nix { };
+          esp32s3-rax = final.callPackage ./nix/esp32s3-rax.nix { };
         };
       };
 

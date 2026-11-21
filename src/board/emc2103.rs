@@ -2,7 +2,7 @@
 //! the internal and diode temperatures and the tachometer computed from the
 //! board state.
 
-use esp32s3_emu::devices::i2c::I2cDevice;
+use esp32s3_rax::devices::i2c::I2cDevice;
 
 use super::pointer::Pointer;
 

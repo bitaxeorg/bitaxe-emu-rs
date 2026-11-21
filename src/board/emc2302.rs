@@ -1,7 +1,7 @@
 //! EMC2302 two-fan controller (0x2F): a register file with each fan's
 //! tachometer computed from the board state.
 
-use esp32s3_emu::devices::i2c::I2cDevice;
+use esp32s3_rax::devices::i2c::I2cDevice;
 
 use super::emc2103::tach_count;
 use super::pointer::Pointer;

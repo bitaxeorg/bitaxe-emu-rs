@@ -19,10 +19,10 @@ pub mod tps546;
 
 use std::sync::{Arc, Mutex};
 
-use esp32s3_emu::devices::efuse::Efuse;
-use esp32s3_emu::devices::i2c::I2cDevice;
-use esp32s3_emu::devices::{PeripheralsConfig, STRAP_SPI_BOOT};
-use esp32s3_emu::machine::{Esp32s3, Esp32s3Config, Event, TICK_HZ};
+use esp32s3_rax::devices::efuse::Efuse;
+use esp32s3_rax::devices::i2c::I2cDevice;
+use esp32s3_rax::devices::{PeripheralsConfig, STRAP_SPI_BOOT};
+use esp32s3_rax::machine::{Esp32s3, Esp32s3Config, Event, TICK_HZ};
 
 use bm13xx::Chain;
 use ds4432::Ds4432;

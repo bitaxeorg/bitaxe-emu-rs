@@ -1,7 +1,7 @@
 //! INA260 power monitor (0x40) on the board input: current, bus voltage and
 //! power from the board state.
 
-use esp32s3_emu::devices::i2c::I2cDevice;
+use esp32s3_rax::devices::i2c::I2cDevice;
 
 use super::pointer::WordAccess;
 
