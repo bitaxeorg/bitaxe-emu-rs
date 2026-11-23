@@ -182,6 +182,10 @@ impl Emulator {
             started.elapsed().as_secs_f64(),
             self.board.machine.icount() as f64 / started.elapsed().as_secs_f64() / 1e6
         );
+        eprintln!(
+            "ASIC chain: {} jobs received, {} nonces found",
+            self.board.chain.jobs_received, self.board.chain.nonces_found
+        );
     }
 
     /// The OLED as text, for headless runs (empty on the colour LCD boards).
