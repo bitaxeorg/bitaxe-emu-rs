@@ -193,14 +193,13 @@ impl Emulator {
         let Screen::Oled(oled) = &self.board.screen else {
             return String::new();
         };
-        let px = oled.lock().pixels();
+        let (px, width) = {
+            let oled = oled.lock();
+            (oled.pixels(), oled.width())
+        };
         let mut out = String::new();
-        for row in px
-            .chunks(board::ssd1306::WIDTH)
-            .collect::<Vec<_>>()
-            .chunks(2)
-        {
-            for x in 0..board::ssd1306::WIDTH {
+        for row in px.chunks(width).collect::<Vec<_>>().chunks(2) {
+            for x in 0..width {
                 let top = row[0][x] != 0;
                 let bottom = row.get(1).is_some_and(|r| r[x] != 0);
                 out.push(match (top, bottom) {
@@ -227,7 +226,7 @@ impl Emulator {
                     .iter()
                     .flat_map(|&p| if on && p != 0 { OLED_LIT } else { OLED_DARK })
                     .collect();
-                (rgba, board::ssd1306::WIDTH as u32, board::OLED_ROWS as u32)
+                (rgba, oled.width() as u32, oled.rows() as u32)
             }
             Screen::Lcd(lcd) => {
                 let (w, h) = (board::st7789::VIEW_WIDTH, board::st7789::VIEW_HEIGHT);
@@ -276,7 +275,7 @@ impl Emulator {
         match &self.board.screen {
             Screen::Oled(oled) => {
                 let o = oled.lock();
-                (o.generation, o.is_on())
+                (o.generation(), o.is_on())
             }
             Screen::Lcd(lcd) => (lcd.generation, lit && lcd.is_on()),
         }

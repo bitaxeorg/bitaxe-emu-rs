@@ -70,6 +70,15 @@ impl Ssd1306 {
         self.on
     }
 
+    /// The panel's rows.
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
+    pub fn width(&self) -> usize {
+        WIDTH
+    }
+
     /// The panel image, row-major, one byte per pixel (0 or 1).
     pub fn pixels(&self) -> Vec<u8> {
         let mut out = vec![0u8; WIDTH * self.rows];

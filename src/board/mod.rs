@@ -9,7 +9,9 @@ pub mod emc2101;
 pub mod emc2103;
 pub mod emc2302;
 pub mod ina260;
+pub mod oled;
 pub mod pointer;
+pub mod sh1107;
 pub mod spec;
 pub mod ssd1306;
 pub mod st7789;
@@ -31,7 +33,6 @@ use emc2103::Emc2103;
 use emc2302::Emc2302;
 use ina260::Ina260;
 use spec::Spec;
-use ssd1306::Ssd1306;
 use st7789::St7789;
 use thermal::Thermal;
 use tmp1075::Tmp1075;
@@ -137,7 +138,7 @@ pub enum Fans {
 }
 
 pub enum Screen {
-    Oled(Shared<Ssd1306>),
+    Oled(Shared<oled::Oled>),
     Lcd(St7789),
 }
 
@@ -281,7 +282,7 @@ impl Board {
         };
         let screen = match spec.display {
             spec::Display::Oled => {
-                let oled = shared(Ssd1306::new(OLED_ROWS));
+                let oled = shared(oled::Oled::from_env());
                 i2c.attach(OLED_ADDR, Box::new(oled.clone()));
                 Screen::Oled(oled)
             }
