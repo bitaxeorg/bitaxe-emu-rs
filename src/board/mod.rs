@@ -163,7 +163,66 @@ pub struct Board {
     pub readings: Readings,
     /// Where to write the flash back (settings, OTA) when the emulator stops.
     pub flash_path: Option<std::path::PathBuf>,
+    /// The accessory on the Bitaxe Accessory Port, when `BITAXE_EMU_BAP_PORT` names a port.
+    bap: Option<Accessory>,
     last_update: u64,
+}
+
+/// The UART of the Bitaxe Accessory Port.
+const BAP_UART: usize = 2;
+
+/// A TCP client on a local port, the accessory on the Bitaxe Accessory Port: its bytes go to
+/// UART2, and UART2's to it.
+struct Accessory {
+    listener: std::net::TcpListener,
+    client: Option<std::net::TcpStream>,
+}
+
+impl Accessory {
+    fn from_env() -> Option<Self> {
+        let port: u16 = std::env::var("BITAXE_EMU_BAP_PORT").ok()?.parse().ok()?;
+        let listener = std::net::TcpListener::bind(("127.0.0.1", port)).ok()?;
+        listener.set_nonblocking(true).ok()?;
+        Some(Self {
+            listener,
+            client: None,
+        })
+    }
+
+    /// Bytes from the accessory, and sends it `to_accessory`.
+    fn exchange(&mut self, to_accessory: &[u8]) -> Vec<u8> {
+        use std::io::{ErrorKind, Read, Write};
+        if self.client.is_none()
+            && let Ok((stream, _)) = self.listener.accept()
+        {
+            let _ = stream.set_nonblocking(true);
+            self.client = Some(stream);
+        }
+        let mut received = Vec::new();
+        let Some(client) = &mut self.client else {
+            return received;
+        };
+        let mut buf = [0u8; 256];
+        let mut lost = client.write_all(to_accessory).is_err();
+        loop {
+            match client.read(&mut buf) {
+                Ok(0) => {
+                    lost = true;
+                    break;
+                }
+                Ok(n) => received.extend_from_slice(&buf[..n]),
+                Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+                Err(_) => {
+                    lost = true;
+                    break;
+                }
+            }
+        }
+        if lost {
+            self.client = None;
+        }
+        received
+    }
 }
 
 impl Board {
@@ -241,6 +300,7 @@ impl Board {
                 ..Readings::default()
             },
             flash_path: None,
+            bap: Accessory::from_env(),
             last_update: 0,
         }
     }
@@ -338,6 +398,15 @@ impl Board {
             self.machine.periph().irq_dirty = true;
         }
         self.exchange_screen();
+        if let Some(bap) = &mut self.bap {
+            let uart = &mut self.machine.periph().uart[BAP_UART];
+            let out: Vec<u8> = uart.tx_out.drain(..).collect();
+            let received = bap.exchange(&out);
+            if !received.is_empty() {
+                self.machine.periph().uart[BAP_UART].receive(&received, now);
+                self.machine.periph().irq_dirty = true;
+            }
+        }
 
         // Power and temperatures.
         let dt = (now - self.last_update) as f32 / TICK_HZ as f32;
