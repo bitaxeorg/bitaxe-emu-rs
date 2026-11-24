@@ -111,6 +111,16 @@ impl Asic {
         }
     }
 
+    /// Bits of the small core ID in a nonce response's job byte, under the job ID
+    /// (log2 of the small cores per core).
+    fn small_core_bits(self) -> u32 {
+        match self {
+            Asic::Bm1397 => 2,
+            Asic::Bm1366 => 3,
+            Asic::Bm1368 | Asic::Bm1370 | Asic::Bm1373 => 4,
+        }
+    }
+
     /// Hash domains, each with its counter (the BM1397 has none).
     fn domains(self) -> usize {
         match self {
@@ -418,16 +428,12 @@ impl Chain {
         let ntime = &f[14..18];
         let mut header = [0u8; 80];
         header[0..4].copy_from_slice(&f[82..86]);
-        // The frame holds the hashes as 32-bit words reversed.
-        for (i, chunk) in f[50..82].chunks(4).enumerate() {
-            for (j, b) in chunk.iter().rev().enumerate() {
-                header[4 + i * 4 + j] = *b;
-            }
-        }
-        for (i, chunk) in f[18..50].chunks(4).enumerate() {
-            for (j, b) in chunk.iter().rev().enumerate() {
-                header[36 + i * 4 + j] = *b;
-            }
+        // The frame holds each hash with its eight 32-bit words in reverse order, the
+        // bytes of each word unchanged.
+        for k in 0..8 {
+            let w = (7 - k) * 4;
+            header[4 + k * 4..8 + k * 4].copy_from_slice(&f[50 + w..54 + w]);
+            header[36 + k * 4..40 + k * 4].copy_from_slice(&f[18 + w..22 + w]);
         }
         header[68..72].copy_from_slice(ntime);
         header[72..76].copy_from_slice(nbits);
@@ -485,8 +491,9 @@ impl Chain {
                 vec![0xaa, 0x55, 0, 0, 0, 0, 0, 0, 0x80]
             };
             r[2..6].copy_from_slice(&nonce.to_le_bytes());
-            let chunk: u16 = u16::from(id) << 3;
-            r[6..8].copy_from_slice(&chunk.to_be_bytes());
+            // Byte 6 is the midstate number, byte 7 the job ID above the small core ID
+            // (0 here).
+            r[7] = (u16::from(id) << self.asic.small_core_bits()) as u8;
             seal(&mut r);
             self.tx.extend(r);
             self.nonces_found += 1;
@@ -670,5 +677,106 @@ mod tests {
         chain.update(1.0);
         // 425 MHz × 672 small cores / 2^20
         assert_eq!(read(&mut chain, HASH_RATE), 272_369);
+    }
+
+    const GENESIS_NONCE: u32 = 2_083_236_893;
+
+    /// The genesis block header.
+    fn genesis() -> [u8; 80] {
+        let mut h = [0u8; 80];
+        h[0] = 1;
+        h[36..68].copy_from_slice(&[
+            0x3b, 0xa3, 0xed, 0xfd, 0x7a, 0x7b, 0x12, 0xb2, 0x7a, 0xc7, 0x2c, 0x3e, 0x67, 0x76,
+            0x8f, 0x61, 0x7f, 0xc8, 0x1b, 0xc3, 0x88, 0x8a, 0x51, 0x32, 0x3a, 0x9f, 0xb8, 0xaa,
+            0x4b, 0x1e, 0x5e, 0x4a,
+        ]);
+        h[68..72].copy_from_slice(&1_231_006_505u32.to_le_bytes());
+        h[72..76].copy_from_slice(&0x1d00_ffffu32.to_le_bytes());
+        h[76..80].copy_from_slice(&GENESIS_NONCE.to_le_bytes());
+        h
+    }
+
+    /// The job frame of `header`: each hash with its 32-bit words in reverse order.
+    fn job_frame(job_byte: u8, header: &[u8; 80]) -> Vec<u8> {
+        let words_reversed =
+            |h: &[u8]| -> Vec<u8> { h.chunks(4).rev().flatten().copied().collect() };
+        let mut f = vec![0x55, 0xaa, CMD_JOB, 0x56, job_byte, 0x01, 0, 0, 0, 0];
+        f.extend(&header[72..76]);
+        f.extend(&header[68..72]);
+        f.extend(words_reversed(&header[36..68]));
+        f.extend(words_reversed(&header[4..36]));
+        f.extend(&header[0..4]);
+        let crc = crc16(&f[2..]);
+        f.extend(crc.to_be_bytes());
+        f
+    }
+
+    #[test]
+    fn job_frames_rebuild_the_block_header() {
+        let mut chain = Chain::new(Asic::Bm1370, 1);
+        chain.set_reset(false);
+        chain.receive(&job_frame(0x18, &genesis()));
+        assert_eq!(chain.jobs[&3].header[..76], genesis()[..76]);
+
+        // The example of bm13xx-protocol's `Command::job_header`: job 21, version
+        // 0x2000_0000, nbits 0x1704_2450, ntime 0x6570_de83, and the hashes in display order.
+        let merkle_root = [
+            0x74, 0x75, 0x19, 0x2d, 0x46, 0x21, 0x63, 0x66, 0x7e, 0x7a, 0x71, 0xb8, 0x35, 0xec,
+            0x83, 0xfe, 0xa4, 0xf3, 0x96, 0xc0, 0xda, 0x86, 0xd8, 0xc0, 0x2e, 0x70, 0x0e, 0xa8,
+            0x71, 0x96, 0xe9, 0xed,
+        ];
+        let prev_hash = [
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x86, 0xff, 0x0e, 0xa5,
+            0xa4, 0x5b, 0xfc, 0x00, 0xd3, 0x55, 0x56, 0xd5, 0x0e, 0xae, 0x1a, 0xd8, 0x76, 0xd7,
+            0x1f, 0x99, 0xe1, 0x38,
+        ];
+        chain.receive(&[
+            0x55, 0xaa, 0x21, 0x36, 0xa8, 0x01, 0x00, 0x00, 0x00, 0x00, 0x50, 0x24, 0x04, 0x17,
+            0x83, 0xde, 0x70, 0x65, 0x2d, 0x19, 0x75, 0x74, 0x66, 0x63, 0x21, 0x46, 0xb8, 0x71,
+            0x7a, 0x7e, 0xfe, 0x83, 0xec, 0x35, 0xc0, 0x96, 0xf3, 0xa4, 0xc0, 0xd8, 0x86, 0xda,
+            0xa8, 0x0e, 0x70, 0x2e, 0xed, 0xe9, 0x96, 0x71, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0xff, 0x86, 0x02, 0x00, 0x5b, 0xa4, 0xa5, 0x0e, 0x55, 0xd3, 0x00, 0xfc,
+            0xae, 0x0e, 0xd5, 0x56, 0xd7, 0x76, 0xd8, 0x1a, 0x38, 0xe1, 0x99, 0x1f, 0x00, 0x00,
+            0x00, 0x20, 0x30, 0xb9,
+        ]);
+        let h = chain.jobs[&21].header;
+        assert_eq!(h[0..4], 0x2000_0000u32.to_le_bytes());
+        assert!(h[4..36].iter().eq(prev_hash.iter().rev()));
+        assert!(h[36..68].iter().eq(merkle_root.iter().rev()));
+        assert_eq!(h[68..72], 0x6570_de83u32.to_le_bytes());
+        assert_eq!(h[72..76], 0x1704_2450u32.to_le_bytes());
+    }
+
+    #[test]
+    fn found_nonces_name_their_job() {
+        // The controller reads the job byte back as `(b & mask) >> shift`: the job ID
+        // sits above 3 small core bits on the BM1366, above 4 on the later chips.
+        for (asic, mask, shift) in [
+            (Asic::Bm1366, 0xf8, 0),
+            (Asic::Bm1368, 0xf0, 1),
+            (Asic::Bm1370, 0xf0, 1),
+            (Asic::Bm1373, 0xf0, 1),
+        ] {
+            for job_byte in [0x08u8, 0x18, 0x78] {
+                let mut chain = Chain::new(asic, 1);
+                chain.set_reset(false);
+                chain.receive(&command(0x51, 0, VERSION_ROLLING, Some(0x8000_ffff)));
+                chain.receive(&job_frame(job_byte, &genesis()));
+                let job = chain.jobs.get_mut(&(job_byte >> 3)).unwrap();
+                job.next_nonce = u64::from(GENESIS_NONCE) - 8;
+                chain.hash_budget = 16;
+                chain.update(0.0);
+                let r: Vec<u8> = chain.tx.drain(..).collect();
+                let what = format!("{} job {job_byte:#04x}", asic.name());
+                assert_eq!(r.len(), 11, "{what}: one nonce, with the version bits");
+                assert_eq!(crc5(&r[2..]), 0, "{what}");
+                assert_eq!(
+                    u32::from_le_bytes(r[2..6].try_into().unwrap()),
+                    GENESIS_NONCE,
+                    "{what}"
+                );
+                assert_eq!((r[7] & mask) >> shift, job_byte, "{what}");
+            }
+        }
     }
 }
