@@ -10,7 +10,7 @@ name = "bitaxe-emu"
 path = "src/main.rs"
 
 [dependencies]
-esp32s3-rax = { path = "../esp32s3-rax" }
+esp32s3-rax = { path = "../emulator/esp32s3-rax" }
 blit = { git = "https://github.com/nicoburniske/blit", rev = "cf322c08a43892ea813deb8c8cadd86a43d5f2c0" }
 blit-desktop = { git = "https://github.com/nicoburniske/blit", rev = "cf322c08a43892ea813deb8c8cadd86a43d5f2c0", default-features = false, features = ["cpu"] }
 blit-cpu = { git = "https://github.com/nicoburniske/blit", rev = "cf322c08a43892ea813deb8c8cadd86a43d5f2c0" }

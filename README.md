@@ -14,7 +14,7 @@ logs.
 Two crates:
 
 - [`esp32s3-rax`](https://github.com/GPTechinno/esp32s3-rax), a repository of
-  its own, checked out next to this one (`../esp32s3-rax`): the ESP32-S3. Its
+  its own, checked out in `../emulator/esp32s3-rax`: the ESP32-S3. Its
   processor is [rax](https://github.com/Georges760/rax/tree/feat/xtensa-esp32s3)'s
   Xtensa LX7 interpreter; the crate models the memory map, the boot from the
   internal ROM, the peripherals and a Wi-Fi network around the chip, and has a

@@ -65,15 +65,17 @@ rustPlatform.buildRustPackage {
     };
   };
 
-  # esp32s3-rax is a path dependency next to the checkout, and rax one next to
-  # esp32s3-rax: a copy of esp32s3-rax in the source, pointing to the rax tree.
+  # esp32s3-rax is a path dependency in the workspace's `emulator` directory, and
+  # rax one in its `upstream` directory: a copy of esp32s3-rax in the source,
+  # pointing to the rax tree. Its manifest names rax `../upstream/rax` up to
+  # a432e4b (beside the checkout), `../../upstream/rax` since it moved.
   postPatch = ''
     cp -r ${esp32s3-rax} esp32s3-rax
     chmod -R u+w esp32s3-rax
-    substituteInPlace esp32s3-rax/Cargo.toml \
-      --replace-fail '"../upstream/rax"' '"${rax}"'
+    sed -i -E 's#"(\.\./)+upstream/rax"#"${rax}"#' esp32s3-rax/Cargo.toml
+    grep -q '"${rax}"' esp32s3-rax/Cargo.toml
     substituteInPlace Cargo.toml \
-      --replace-fail '"../esp32s3-rax"' '"./esp32s3-rax"'
+      --replace-fail '"../emulator/esp32s3-rax"' '"./esp32s3-rax"'
   '';
 
   nativeBuildInputs = [
