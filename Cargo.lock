@@ -2289,6 +2289,7 @@ checksum = "20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539"
 [[package]]
 name = "rax"
 version = "0.1.0"
+source = "git+https://github.com/Georges760/rax?branch=feat%2Fxtensa-esp32s3#e395fe44df3795f29113914e4041cd294781fccf"
 dependencies = [
  "bitflags 2.13.2",
  "clap",

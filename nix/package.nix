@@ -42,6 +42,14 @@ let
     vulkan-loader
   ];
   fonts = "${dejavu_fonts}/share/fonts/truetype";
+  # Cargo.lock with rax (and vm-memory, a path dependency inside it) as path
+  # packages: the package builds rax from the sparse tree of `rax`, not from
+  # its git repository, whose documents take 3 GB.
+  lockFileContents = lib.concatStringsSep "\n" (
+    lib.filter (line: !lib.hasPrefix ''source = "git+https://github.com/Georges760/rax'' line) (
+      lib.splitString "\n" (builtins.readFile ../Cargo.lock)
+    )
+  );
 in
 rustPlatform.buildRustPackage {
   pname = "bitaxe-emu";
@@ -59,23 +67,28 @@ rustPlatform.buildRustPackage {
   };
 
   cargoLock = {
-    lockFile = ../Cargo.lock;
+    inherit lockFileContents;
     outputHashes = {
       "blit-0.1.0" = "sha256-YSoaLiCByY9OxwOUZxRTAi1wed6yieWCXJ04h00BxAg=";
     };
   };
 
-  # esp32s3-rax is a path dependency in the workspace's `emulator` directory, and
-  # rax one in its `upstream` directory: a copy of esp32s3-rax in the source,
-  # pointing to the rax tree. Its manifest names rax `../upstream/rax` up to
-  # a432e4b (beside the checkout), `../../upstream/rax` since it moved.
+  # esp32s3-rax is a path dependency in the workspace's `emulator` directory: a
+  # copy of esp32s3-rax in the source, pointing to the rax tree. Its manifest
+  # names rax by path, `../upstream/rax` up to a432e4b and `../../upstream/rax`
+  # after, then by git, the fork's `feat/xtensa-esp32s3` branch. The Cargo.lock
+  # of the vendored dependencies replaces the source's, as cargo's checks need.
   postPatch = ''
     cp -r ${esp32s3-rax} esp32s3-rax
     chmod -R u+w esp32s3-rax
-    sed -i -E 's#"(\.\./)+upstream/rax"#"${rax}"#' esp32s3-rax/Cargo.toml
-    grep -q '"${rax}"' esp32s3-rax/Cargo.toml
+    sed -i -E \
+      -e 's#"(\.\./)+upstream/rax"#"${rax}"#' \
+      -e 's#git = "https://github.com/Georges760/rax", branch = "[^"]*"#path = "${rax}"#' \
+      esp32s3-rax/Cargo.toml
+    grep -q 'path = "${rax}"' esp32s3-rax/Cargo.toml
     substituteInPlace Cargo.toml \
       --replace-fail '"../emulator/esp32s3-rax"' '"./esp32s3-rax"'
+    cp ${builtins.toFile "Cargo.lock" lockFileContents} Cargo.lock
   '';
 
   nativeBuildInputs = [
