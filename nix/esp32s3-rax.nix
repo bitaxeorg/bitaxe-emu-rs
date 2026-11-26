@@ -3,6 +3,6 @@
 
 fetchgit {
   url = "https://github.com/GPTechinno/esp32s3-rax.git";
-  rev = "a432e4b513930c60b2078eed7ae7b015c8705928";
-  hash = "sha256-N9HlCus0j+I27nMM6he1M2MVO2EOudZiwYuRdYC8EQw=";
+  rev = "73878aabe74d77d7a657748f83aec6870e5da976";
+  hash = "sha256-cbF2iBMySZmOwKiqaqK8iJa3R7iRoJoGwji0alJg+9E=";
 }
