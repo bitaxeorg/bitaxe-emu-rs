@@ -882,6 +882,7 @@ dependencies = [
 [[package]]
 name = "esp32s3-rax"
 version = "0.1.0"
+source = "git+https://github.com/GPTechinno/esp32s3-rax?branch=main#73878aabe74d77d7a657748f83aec6870e5da976"
 dependencies = [
  "aes",
  "clap",

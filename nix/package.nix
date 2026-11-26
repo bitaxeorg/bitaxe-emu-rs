@@ -42,11 +42,16 @@ let
     vulkan-loader
   ];
   fonts = "${dejavu_fonts}/share/fonts/truetype";
-  # Cargo.lock with rax (and vm-memory, a path dependency inside it) as path
-  # packages: the package builds rax from the sparse tree of `rax`, not from
-  # its git repository, whose documents take 3 GB.
+  # Cargo.lock with esp32s3-rax and rax (and vm-memory, a path dependency
+  # inside rax) as path packages: the package builds esp32s3-rax from the tree
+  # of `esp32s3-rax` and rax from the sparse tree of `rax`, not from rax's git
+  # repository, whose documents take 3 GB.
+  gitSources = [
+    ''source = "git+https://github.com/Georges760/rax''
+    ''source = "git+https://github.com/GPTechinno/esp32s3-rax''
+  ];
   lockFileContents = lib.concatStringsSep "\n" (
-    lib.filter (line: !lib.hasPrefix ''source = "git+https://github.com/Georges760/rax'' line) (
+    lib.filter (line: !lib.any (source: lib.hasPrefix source line) gitSources) (
       lib.splitString "\n" (builtins.readFile ../Cargo.lock)
     )
   );
@@ -73,11 +78,13 @@ rustPlatform.buildRustPackage {
     };
   };
 
-  # esp32s3-rax is a path dependency in the workspace's `emulator` directory: a
-  # copy of esp32s3-rax in the source, pointing to the rax tree. Its manifest
-  # names rax by path, `../upstream/rax` up to a432e4b and `../../upstream/rax`
-  # after, then by git, the fork's `feat/xtensa-esp32s3` branch. The Cargo.lock
-  # of the vendored dependencies replaces the source's, as cargo's checks need.
+  # esp32s3-rax, which the manifest takes by git (by path from the workspace's
+  # `emulator` directory up to bd32d2c): a copy of the `esp32s3-rax` tree in
+  # the source, at the revision the lock names, pointing to the rax tree. Its
+  # manifest names rax by path, `../upstream/rax` up to a432e4b and
+  # `../../upstream/rax` after, then by git, the fork's `feat/xtensa-esp32s3`
+  # branch. The Cargo.lock of the vendored dependencies replaces the source's,
+  # as cargo's checks need.
   postPatch = ''
     cp -r ${esp32s3-rax} esp32s3-rax
     chmod -R u+w esp32s3-rax
@@ -86,8 +93,11 @@ rustPlatform.buildRustPackage {
       -e 's#git = "https://github.com/Georges760/rax", branch = "[^"]*"#path = "${rax}"#' \
       esp32s3-rax/Cargo.toml
     grep -q 'path = "${rax}"' esp32s3-rax/Cargo.toml
-    substituteInPlace Cargo.toml \
-      --replace-fail '"../emulator/esp32s3-rax"' '"./esp32s3-rax"'
+    sed -i -E \
+      -e 's#"\.\./emulator/esp32s3-rax"#"./esp32s3-rax"#' \
+      -e 's#git = "https://github.com/GPTechinno/esp32s3-rax", branch = "[^"]*"#path = "./esp32s3-rax"#' \
+      Cargo.toml
+    grep -q 'path = "./esp32s3-rax"' Cargo.toml
     cp ${builtins.toFile "Cargo.lock" lockFileContents} Cargo.lock
   '';
 
